@@ -1,5 +1,7 @@
 use std::{
+    fs,
     net::IpAddr,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,13 +11,19 @@ use catplay_iap2_client::{
     tokio::{AsyncClient, AsyncClientStream, IAP2Fd},
 };
 use catplay_iap2_usb::{NcmHelper, UdcHelper};
-use catplay_util::{AsyncShutdown, EventReconciler, EventSleeper, Reconcilable, Reconciler, deadline_after, event_select};
+use catplay_util::{
+    AsyncShutdown, EventReconciler, EventSleeper, Reconcilable, Reconciler, deadline_after,
+    event_select,
+};
 use log::{debug, error, info};
 
 use catplay_iap2_usb::{GadgetError, GadgetResult};
 use uuid::Uuid;
 
-use crate::{AccessoryData, CarUsbTransport, GadgetStatus, phone_gadget::PhoneGadget, phone_gadget_driver::PhoneGadgetDriver};
+use crate::{
+    AccessoryData, CarUsbTransport, GadgetStatus, phone_gadget::PhoneGadget,
+    phone_gadget_driver::PhoneGadgetDriver,
+};
 
 #[derive(Debug, thiserror::Error, PartialEq, Clone)]
 pub enum CarPlayPhoneGadgetError {
@@ -27,7 +35,9 @@ pub enum CarPlayPhoneGadgetError {
     AccessoryFailedToOpenIAp2 { path: String, error: String },
     #[error("Accessory claimed to offer CarPlay NCM interface, but it failed to bind: {0}")]
     AccessoryFailedNCM(GadgetError),
-    #[error("Accessory has failed to notice our gadget, and all USB reset attempts have been exhausted")]
+    #[error(
+        "Accessory has failed to notice our gadget, and all USB reset attempts have been exhausted"
+    )]
     AccessoryFailedToNoticeOurGadget,
     #[error("Accessory failed to answer basic USB query")]
     AccessoryFailedUSBQuery(GadgetError),
@@ -126,12 +136,20 @@ pub struct CarPlayPhoneGadget {
 
     csm: CsmSessionCallback,
     burst_wakeups: bool,
+    attach_watch: bool,
+    /// Last time the device-side gadget was (re)published while waiting for a
+    /// host.  ROCK 2A's dwc3 can remain `not attached` when the peer's dwc2
+    /// recovers host mode after our initial pull-up was already asserted.  A
+    /// bounded PHY cycle supplies a fresh attach edge without restarting the
+    /// daemon.
+    last_device_republish: Instant,
 }
 
 impl CarPlayPhoneGadget {
     const RESTART_DELAY: Duration = Duration::from_millis(1000);
     const ACCESSORY_DETECT_TIMEOUT: Duration = Duration::from_millis(5000);
     const TIMEOUT_IAP2_NEGOTIATE: Duration = Duration::from_millis(8000);
+    const ROCKCHIP_OTG_MODE: &'static str = "/sys/devices/platform/ffdf0000.usb2-phy/otg_mode";
 
     pub fn new_with_csm<T: CsmSession, F: Fn() -> T + Send + Sync + 'static>(
         udc: Option<&str>,
@@ -167,6 +185,8 @@ impl CarPlayPhoneGadget {
             accessory_iap2: None,
             csm,
             burst_wakeups: false,
+            attach_watch: false,
+            last_device_republish: Instant::now(),
         };
         Ok(Reconciler::new(me, Ok(CarPlayPhoneGadgetStatus::Initial)))
     }
@@ -184,9 +204,11 @@ impl CarPlayPhoneGadget {
 
         let session = (self.csm)();
         let client = AsyncClient::new(true, CsmRemote::usb_gadget(), session);
-        let fd = IAP2Fd::open(&path).map_err(|error| CarPlayPhoneGadgetError::AccessoryFailedToOpenIAp2 {
-            path,
-            error: error.to_string(),
+        let fd = IAP2Fd::open(&path).map_err(|error| {
+            CarPlayPhoneGadgetError::AccessoryFailedToOpenIAp2 {
+                path,
+                error: error.to_string(),
+            }
         })?;
 
         let pipe = AsyncClientStream::new(client.0, client.1, fd);
@@ -224,10 +246,20 @@ impl CarPlayPhoneGadget {
 
         debug!("Creating gadget");
 
-        let udc = self.udc.as_ref().ok_or(CarPlayPhoneGadgetError::FailedGadgetCreate(GadgetError::MissingUdc))?;
+        let udc = self
+            .udc
+            .as_ref()
+            .ok_or(CarPlayPhoneGadgetError::FailedGadgetCreate(
+                GadgetError::MissingUdc,
+            ))?;
 
-        let mut gadget = PhoneGadget::new_with_serial(&self.iphone_instance, true, udc, self.iphone_serial.as_deref())
-            .map_err(CarPlayPhoneGadgetError::FailedGadgetCreate)?;
+        let mut gadget = PhoneGadget::new_with_serial(
+            &self.iphone_instance,
+            true,
+            udc,
+            self.iphone_serial.as_deref(),
+        )
+        .map_err(CarPlayPhoneGadgetError::FailedGadgetCreate)?;
         debug!("Starting gadget");
 
         if let Err(err) = CarUsbTransport::prepare_device(&mut gadget)
@@ -241,6 +273,46 @@ impl CarPlayPhoneGadget {
         debug!("Gadget started");
 
         self.gadget.replace(gadget);
+        self.last_device_republish = Instant::now();
+
+        Ok(())
+    }
+
+    /// Re-assert the device-side attach edge while waiting for the car host.
+    ///
+    /// A plain composite-gadget unbind/bind is not sufficient on rk3528 after
+    /// the peer spent time in dwc2 device mode: the DWC3 remains `not attached`
+    /// even after the peer returns to host.  Cycling the Rockchip PHY's forced
+    /// ID state makes its OTG state machine sample VBUS again and is the
+    /// shortest device-measured recovery.  Other platforms retain the generic
+    /// gadget-only reset.
+    async fn republish_device_attach(&mut self) -> PhoneResult<()> {
+        let gadget = self
+            .gadget
+            .as_mut()
+            .ok_or(CarPlayPhoneGadgetError::FailedGadgetCreate(
+                GadgetError::MissingUdc,
+            ))?;
+
+        if Path::new(Self::ROCKCHIP_OTG_MODE).exists() {
+            fs::write(Self::ROCKCHIP_OTG_MODE, "host").map_err(|err| {
+                CarPlayPhoneGadgetError::FailedHostSwitch(GadgetError::OtherString(format!(
+                    "failed to kick Rockchip PHY to host: {err}"
+                )))
+            })?;
+            // 500 ms was verified on ROCK 2A; it is long enough for xHCI/DWC3
+            // teardown but keeps the retry substantially below the 5 s loop.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            fs::write(Self::ROCKCHIP_OTG_MODE, "peripheral").map_err(|err| {
+                CarPlayPhoneGadgetError::FailedHostSwitch(GadgetError::OtherString(format!(
+                    "failed to return Rockchip PHY to peripheral: {err}"
+                )))
+            })?;
+        } else {
+            CarUsbTransport::reset_to_device(gadget)
+                .await
+                .map_err(CarPlayPhoneGadgetError::FailedGadgetBind)?;
+        }
 
         Ok(())
     }
@@ -253,6 +325,10 @@ impl EventSleeper for CarPlayPhoneGadget {
             self.accessory_iap2,
             deadline_after(if self.burst_wakeups {
                 Duration::from_millis(20)
+            } else if self.attach_watch {
+                // Wake periodically while GadgetStarted so render() can
+                // republish the attach edge after a late peer-host recovery.
+                Duration::from_secs(1)
             } else {
                 Duration::MAX
             })
@@ -278,8 +354,10 @@ impl Reconcilable for CarPlayPhoneGadget {
         self.burst_wakeups = new.is_err()
             || matches!(
                 new,
-                Ok(CarPlayPhoneGadgetStatus::WaitingForStableMulticast) | Ok(CarPlayPhoneGadgetStatus::WaitingForAccessory { .. })
+                Ok(CarPlayPhoneGadgetStatus::WaitingForStableMulticast)
+                    | Ok(CarPlayPhoneGadgetStatus::WaitingForAccessory { .. })
             );
+        self.attach_watch = matches!(new, Ok(CarPlayPhoneGadgetStatus::GadgetStarted));
 
         new
     }
@@ -308,7 +386,8 @@ impl Reconcilable for CarPlayPhoneGadget {
 
             let gstatus = gadget.status();
             if gstatus.is_final() && !gstatus.is_role_switch() {
-                return CarPlayPhoneGadgetError::AccessoryDisconnectedWithoutRoleSwitch(gstatus).into();
+                return CarPlayPhoneGadgetError::AccessoryDisconnectedWithoutRoleSwitch(gstatus)
+                    .into();
             }
 
             // if gstatus == GadgetStatus::Suspended {
@@ -317,7 +396,10 @@ impl Reconcilable for CarPlayPhoneGadget {
 
             if gstatus.is_role_switch()
                 && status != CarPlayPhoneGadgetStatus::ReceivedRoleSwitch
-                && !matches!(status, CarPlayPhoneGadgetStatus::WaitingForAccessory { pinned: false })
+                && !matches!(
+                    status,
+                    CarPlayPhoneGadgetStatus::WaitingForAccessory { pinned: false }
+                )
             {
                 return CarPlayPhoneGadgetStatus::ReceivedRoleSwitch.into();
             }
@@ -335,7 +417,9 @@ impl Reconcilable for CarPlayPhoneGadget {
                 return CarPlayPhoneGadgetStatus::DetectedAccessory.into();
             }
 
-            if gstatus == GadgetStatus::Enabled && status != CarPlayPhoneGadgetStatus::ReceivedEnable {
+            if gstatus == GadgetStatus::Enabled
+                && status != CarPlayPhoneGadgetStatus::ReceivedEnable
+            {
                 return CarPlayPhoneGadgetStatus::ReceivedEnable.into();
             }
         };
@@ -350,6 +434,16 @@ impl Reconcilable for CarPlayPhoneGadget {
         }
 
         if status == CarPlayPhoneGadgetStatus::GadgetStarted {
+            const REPUBLISH_INTERVAL: Duration = Duration::from_secs(5);
+
+            if self.last_device_republish.elapsed() >= REPUBLISH_INTERVAL {
+                info!(
+                    "Gadget still waiting for host after {:?}; republishing device attach",
+                    REPUBLISH_INTERVAL
+                );
+                self.republish_device_attach().await?;
+                self.last_device_republish = Instant::now();
+            }
             return CarPlayPhoneGadgetStatus::GadgetStarted.into();
         }
 
@@ -428,7 +522,10 @@ impl Reconcilable for CarPlayPhoneGadget {
             // milliseconds after the accessory is probed, so the interface name
             // captured at DetectedAccessory time can already be stale by the
             // time the interface is touched. Refresh it for the later stages..
-            let fresh = self.gadget.as_ref().and_then(|gadget| gadget.status().as_accessory());
+            let fresh = self
+                .gadget
+                .as_ref()
+                .and_then(|gadget| gadget.status().as_accessory());
             if let Some(fresh) = fresh {
                 self.accessory.replace(fresh);
             }
@@ -445,8 +542,13 @@ impl Reconcilable for CarPlayPhoneGadget {
                 // direct read: gadget.status() returns a field that only
                 // reconcile() refreshes, and reconcile() does not run in here.
                 NcmHelper::retry(|| {
-                    let ncm = PhoneGadgetDriver::get_iap2_ifname(&self.iphone_instance)
-                        .map_err(|err| GadgetError::OtherString(format!("NCM interface unavailable during setup: {err}")))?;
+                    let ncm = PhoneGadgetDriver::get_iap2_ifname(&self.iphone_instance).map_err(
+                        |err| {
+                            GadgetError::OtherString(format!(
+                                "NCM interface unavailable during setup: {err}"
+                            ))
+                        },
+                    )?;
 
                     NcmHelper::configure_for_carplay(&ncm, NcmHelper::LINK_LOCAL_IP_PHONE)
                 })

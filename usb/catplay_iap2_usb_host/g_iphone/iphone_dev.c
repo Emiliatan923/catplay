@@ -510,6 +510,7 @@ static int iphone_dev_set_otg_role_internal(struct iphone_dev_data *data,
 {
 	int ret;
 	bool role_is_device;
+	bool role_already_set;
 
 	if (!data || !data->driver)
 		return -ENODEV;
@@ -525,12 +526,8 @@ static int iphone_dev_set_otg_role_internal(struct iphone_dev_data *data,
 		return -EINVAL;
 	}
 
-	if (data->otg_role_cache_valid &&
-	    data->otg_role_device_cached == role_is_device) {
-		pr_debug("iPhone: OTG role '%s' already cached, skipping\n",
-			 usb_role_string(role));
-		return 0;
-	}
+	role_already_set = data->otg_role_cache_valid &&
+		data->otg_role_device_cached == role_is_device;
 
 	if (role == USB_ROLE_HOST && manage_gadget_lifecycle) {
 		ret = iphone_dev_unbind_gadget(data);
@@ -538,16 +535,28 @@ static int iphone_dev_set_otg_role_internal(struct iphone_dev_data *data,
 			return ret;
 	}
 
-	ret = set_usb_role(data, role);
-	if (ret) {
-		pr_warn("iPhone: failed to switch USB role to %s: %d\n",
-			usb_role_string(role), ret);
-		return ret;
-	}
-	data->otg_role_device_cached = role_is_device;
-	data->otg_role_cache_valid = true;
+	if (!role_already_set) {
+		ret = set_usb_role(data, role);
+		if (ret) {
+			pr_warn("iPhone: failed to switch USB role to %s: %d\n",
+				usb_role_string(role), ret);
+			return ret;
+		}
+		data->otg_role_device_cached = role_is_device;
+		data->otg_role_cache_valid = true;
 
-	pr_info("iPhone: set OTG role '%s'\n", usb_role_string(role));
+		pr_info("iPhone: set OTG role '%s'\n", usb_role_string(role));
+	} else {
+		/*
+		 * Only the electrical role is cached.  Lifecycle work must still run:
+		 * after a ROCK 2A device transition the UDC can appear about 120 ms
+		 * late, so the first bind may fail even though the role itself stuck.
+		 * Returning here used to make every later DEVICE retry a no-op and
+		 * could leave the gadget permanently unpublished after a cable pull.
+		 */
+		pr_debug("iPhone: OTG role '%s' already cached; keeping lifecycle work\n",
+			 usb_role_string(role));
+	}
 
 	if (role == USB_ROLE_DEVICE && manage_gadget_lifecycle) {
 		ret = iphone_dev_bind_gadget(data);
