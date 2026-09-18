@@ -20,19 +20,9 @@ impl ClientSessionHelper {
         packet: &dyn AsCsmPacket,
         client: CsmClientHandleRef,
     ) -> CsmSessionResult<bool> {
-        const MOCK_MFI: bool = true;
-
         if RequestAuthenticationCertificate::cast(packet).is_some() {
             return match mfi {
-                None => {
-                    if MOCK_MFI {
-                        client.send(&AuthenticationCertificate {
-                            authentication_certificate: [42u8; 1024].into(),
-                        })?;
-                        return Ok(true);
-                    }
-                    Err("RequestAuthenticationCertificate received without MFI device registered".into())
-                }
+                None => Err("RequestAuthenticationCertificate received without MFI device registered".into()),
                 Some(mfi) => {
                     debug!("Reading MFI cert");
                     let cert = mfi.read_certificate()?;
@@ -49,22 +39,22 @@ impl ClientSessionHelper {
         if let Some(racr) = RequestAuthenticationChallengeResponse::cast(packet) {
             use catplay_util::spawn_blocking;
 
-            if mfi.is_none() && MOCK_MFI {
-                client.send(&AuthenticationResponse {
-                    authentication_response: [42u8; 512].into(),
-                })?;
-                return Ok(true);
-            }
             let Some(mfi) = mfi else {
                 return Err("RequestAuthenticationChallengeResponse received without MFI device registered".into());
             };
 
-            debug!("Signing MFI challenge bytes {:?}", racr.authentication_challenge);
+            debug!("Signing MFI challenge ({} bytes)", racr.authentication_challenge.data.len());
             let challenge = racr.authentication_challenge.data.clone();
             let mfi = mfi.clone();
 
-            let response: CsmByteArray = spawn_blocking(move || mfi.generate_challenge_response(&challenge[..])).await.unwrap()?.into();
-            debug!("Responding to RequestAuthenticationChallengeResponse with {:?}", response);
+            let response: CsmByteArray = spawn_blocking(move || mfi.generate_challenge_response(&challenge[..]))
+                .await
+                .map_err(|error| format!("MFI signing worker failed: {error}"))??
+                .into();
+            debug!(
+                "Responding to RequestAuthenticationChallengeResponse ({} bytes)",
+                response.data.len()
+            );
 
             client.send(&AuthenticationResponse {
                 authentication_response: response,

@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
+#include <linux/netdevice.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
@@ -13,6 +14,8 @@
 #include <linux/usb/cdc.h>
 #include <linux/usb/cdc_ncm.h>
 #include <linux/usb/usbnet.h>
+
+#include "kver_compat.h"
 
 #include "iap2_scan.h"
 
@@ -505,6 +508,7 @@ static struct iap2_acc_accessory *iap2_acc_build_accessory(struct accessory_matc
         acc->product[0] = '\0';
 
     strscpy(acc->ifname, netdev_name(usbnet->net), sizeof(acc->ifname));
+    acc->ifindex = usbnet->net->ifindex;
     ret = iap2_find_devnode(iap2_intf, acc->iap2_devnode,
                             sizeof(acc->iap2_devnode));
     if (ret) {
@@ -610,8 +614,21 @@ static ssize_t ifname_show(struct device *dev,
                            struct device_attribute *attr, char *buf)
 {
     struct iap2_acc_entry *entry = dev_get_drvdata(dev);
+    struct net_device *net;
+    ssize_t ret;
 
-    return sysfs_emit(buf, "%s\n", entry->acc->ifname);
+    /*
+     * Resolve the live name from the ifindex recorded at probe: udev renames the
+     * interface right afterwards. The reference taken here is dropped before
+     * returning - see the note on struct iap2_acc_accessory.
+     */
+    net = dev_get_by_index(&init_net, entry->acc->ifindex);
+    if (!net)
+        return sysfs_emit(buf, "%s\n", entry->acc->ifname);
+
+    ret = sysfs_emit(buf, "%s\n", netdev_name(net));
+    dev_put(net);
+    return ret;
 }
 
 static ssize_t iap2_devnode_show(struct device *dev,
@@ -912,7 +929,7 @@ static int __init iap2_scan_init(void)
 {
     int ret;
 
-    iap2_acc_class = class_create("iap2_accessory");
+    iap2_acc_class = IPHONE_CLASS_CREATE("iap2_accessory");
     if (IS_ERR(iap2_acc_class))
         return PTR_ERR(iap2_acc_class);
     iap2_acc_class->dev_groups = iap2_acc_groups;

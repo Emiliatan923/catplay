@@ -13,7 +13,9 @@ use catplay_carplay_tx_gadget::client::{CarPlayUsbClientGadget, CarPlayUsbClient
 use catplay_hap::HomekitStorageRef;
 use catplay_iap2_usb::GadgetError;
 use catplay_mfi::MfiDeficeRef;
-use catplay_util::{AsyncShutdown, EventReconciler, EventSleeper, EventToken, Reconcilable, Reconciler, deadline_after, event_select, mpsc};
+use catplay_util::{
+    AsyncShutdown, EventReconciler, EventSleeper, EventToken, Reconcilable, Reconciler, deadline_after, event_select, mpsc,
+};
 use log::{debug, error, info};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -37,6 +39,11 @@ pub struct ProdGadgetConfig {
     pub channel: Option<u8>,
     pub passphrase: String,
 
+    pub pinned: bool,
+    pub iphone_instance: String,
+    pub iphone_serial: String,
+    pub bonjour_id: String,
+
     pub bt_cache_file: String,
     pub persist_dir: Option<PathBuf>,
 }
@@ -51,6 +58,7 @@ pub struct ProdGadget {
 
     last_tx: Arc<Mutex<Option<ProdGadgetSession>>>,
     burst_wakeups: bool,
+    session_seq: u64,
 }
 
 #[derive(Clone, PartialEq, Debug, thiserror::Error)]
@@ -65,6 +73,9 @@ pub enum ProdGadgetError {
 
     #[error("Transmitter reached eof before pickup: {0}")]
     UnpickedTransmitterEof(#[from] AirPlayTransmitterSessionError),
+
+    #[error("Failed to initialize car proxy: {0}")]
+    FailedToStartProxy(catplay_carplay::rtsp_frame::RtspError),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -110,6 +121,7 @@ impl ProdGadget {
                 pending_transmitter: Default::default(),
                 last_tx: Default::default(),
                 burst_wakeups: false,
+                session_seq: 0,
             },
             Ok(ProdGadgetState::Initial),
         )
@@ -134,6 +146,7 @@ impl AsyncShutdown for ProdGadget {
 
 #[derive(Clone)]
 pub struct ProdGadgetSession {
+    pub id: u64,
     pub proxy_tx: mpsc::UnboundedSender<TxAdapterOp>,
 }
 
@@ -168,6 +181,7 @@ impl Reconcilable for ProdGadget {
         if new.is_err() {
             debug!("Cleaning up due to error state");
             self.pending_transmitter.lock().await.take();
+            self.last_tx.lock().unwrap().take();
             if let Some(rx) = self.rx.as_mut() {
                 rx.child_mut().set_invites_blocked(true)
             };
@@ -231,12 +245,13 @@ impl Reconcilable for ProdGadget {
         }
 
         if self.tx.is_none() {
-            let gadget = CarPlayUsbClientGadget::new(
-                "default",
-                "aa:bb:cc:dd:ee:ff",
+            let gadget = CarPlayUsbClientGadget::new_with_identity(
+                &self.cfg.iphone_instance,
+                Some(&self.cfg.iphone_serial),
+                &self.cfg.bonjour_id,
                 self.cfg.udc_tx.as_deref(),
                 self.cfg.homekit_tx.clone(),
-                false,
+                self.cfg.pinned,
             )
             .map_err(|err| LocalError::FailedToSetupUsbClient(err))?;
             self.tx.replace(gadget);
@@ -257,29 +272,39 @@ impl Reconcilable for ProdGadget {
             // pending_transmitter.replace(transmitter);
 
             let proxy_chan = mpsc::unbounded();
-            let car_state = ProdGadgetSession { proxy_tx: proxy_chan.0 };
+            let car_state = ProdGadgetSession {
+                id: 0,
+                proxy_tx: proxy_chan.0,
+            };
 
-            let transmitter2 = CarManager::new(transmitter, proxy_chan.1, self.cfg.persist_dir.clone());
-            transmitter2.await.expect("TODO").background();
-            self.last_tx.lock().unwrap().replace(car_state);
+            let manager = CarManager::new(transmitter, proxy_chan.1, self.cfg.persist_dir.clone(), self.cfg.hci.clone())
+                .await
+                .map_err(LocalError::FailedToStartProxy)?;
+            self.session_seq = self.session_seq.wrapping_add(1);
+            let session_id = self.session_seq;
+            let session_slot = self.last_tx.clone();
+            self.last_tx.lock().unwrap().replace(ProdGadgetSession {
+                id: session_id,
+                ..car_state
+            });
+            tokio::spawn(async move {
+                manager.worker().await;
+                let mut slot = session_slot.lock().unwrap();
+                if slot.as_ref().is_some_and(|session| session.id == session_id) {
+                    slot.take();
+                }
+            });
         }
 
-        // TODO: this doesn't properly go back to `blocked` after transmit session is closed
+        // The worker completion callback clears last_tx, which blocks new
+        // wireless invites until a fresh car session is available.
         rx.child_mut().set_invites_blocked(self.last_tx.lock().unwrap().is_none());
 
         match _status {
-            ProdGadgetState::Initial => {
-                ProdGadgetState::WaitingForUdc.into()
-            }
-            ProdGadgetState::WaitingForUdc => {
-                ProdGadgetState::WaitingForUsbTransmitterGadget.into()
-            }
-            ProdGadgetState::WaitingForUsbTransmitterGadget => {
-                ProdGadgetState::WaitingForWirelessCarPlayGadget.into()
-            }
-            ProdGadgetState::WaitingForWirelessCarPlayGadget => {
-                ProdGadgetState::WaitingForCar.into()
-            }
+            ProdGadgetState::Initial => ProdGadgetState::WaitingForUdc.into(),
+            ProdGadgetState::WaitingForUdc => ProdGadgetState::WaitingForUsbTransmitterGadget.into(),
+            ProdGadgetState::WaitingForUsbTransmitterGadget => ProdGadgetState::WaitingForWirelessCarPlayGadget.into(),
+            ProdGadgetState::WaitingForWirelessCarPlayGadget => ProdGadgetState::WaitingForCar.into(),
             ProdGadgetState::WaitingForCar => match tx.state() {
                 Ok(CarPlayUsbClientGadgetStatus::Transmitting | CarPlayUsbClientGadgetStatus::TransmitterReadyForPickup) => {
                     ProdGadgetState::WaitingForIPhone.into()

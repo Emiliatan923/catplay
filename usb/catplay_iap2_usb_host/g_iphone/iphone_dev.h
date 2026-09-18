@@ -19,7 +19,6 @@ struct iphone_dev_data
 	char serial_r[64];
 
 	char udc[64]; /* or NULL for auto */
-	char role_switch_name[64];
 	char *udc_name_vec[2];
 	char driver_name[64];
 	bool udc_auto;
@@ -34,9 +33,16 @@ struct iphone_dev_data
 	struct f_iphone_usb_config usb_configs[4]; 
 	struct usb_device_descriptor dev_desc;
 	struct usb_composite_dev *cdev;
+	struct usb_role_switch *role_switch;
+	/* usb_role class name when no fwnode-backed switch is available */
+	char role_switch_name[64];
+	/*
+	 * Rockchip PHY otg_mode path, resolved once while cdev exists and cached
+	 * so role changes still work after the gadget has been unbound.
+	 */
+	char rockchip_phy_mode_path[256];
 	struct work_struct status_notify_work;
 	struct work_struct role_switch_work;
-	struct delayed_work recovery_work;
 	struct delayed_work role_switch_rebind_work;
 	struct delayed_work accessory_watch_work;
 	struct mutex lock;
@@ -44,8 +50,6 @@ struct iphone_dev_data
 	bool accessory_link_added;
 	bool role_switch_work_scheduled;
 	bool role_switch_rebind_scheduled;
-	bool recovery_work_scheduled;
-	const char *recovery_command;
 	bool otg_role_device_cached;
 	bool otg_role_cache_valid;
 	bool driver_registered;

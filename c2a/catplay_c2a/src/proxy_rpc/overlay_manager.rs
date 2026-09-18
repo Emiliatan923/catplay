@@ -43,7 +43,7 @@ pub struct OverlayManager {
 }
 
 impl OverlayManager {
-    pub fn new(width: u32, height: u32, dpi: f32, persist_dir: Option<PathBuf>) -> Self {
+    pub fn new(width: u32, height: u32, dpi: f32, persist_dir: Option<PathBuf>, bluetooth_adapter: &str) -> Self {
         Self {
             width,
             height,
@@ -61,7 +61,7 @@ impl OverlayManager {
 
             renderer: None,
 
-            policy: OverlayPolicyDefault::new(),
+            policy: OverlayPolicyDefault::new(bluetooth_adapter),
             lazy_screen: None,
         }
     }

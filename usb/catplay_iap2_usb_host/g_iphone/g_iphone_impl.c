@@ -37,22 +37,6 @@ int g_iphone_start_role_switch_probe(struct g_iphone *iphone_gadget)
 	return iphone_gadget->start_role_switch_probe(iphone_gadget);
 }
 
-int g_iphone_start_recovery(struct g_iphone *iphone_gadget)
-{
-	if (!iphone_gadget || !iphone_gadget->start_recovery)
-		return -EOPNOTSUPP;
-
-	return iphone_gadget->start_recovery(iphone_gadget);
-}
-
-int g_iphone_start_gadget(struct g_iphone *iphone_gadget)
-{
-	if (!iphone_gadget || !iphone_gadget->start_gadget)
-		return -EOPNOTSUPP;
-
-	return iphone_gadget->start_gadget(iphone_gadget);
-}
-
 char *g_iphone_status_str(enum GadgetStatus status)
 {
     switch (status)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include "kver_compat.h"
 #include "composite.h"
 #include "iphone_dev.h"
 #include "iphone_class.h"
@@ -133,8 +134,8 @@ static ssize_t status_show(struct device *dev,
 static DEVICE_ATTR_RO(status);
 
 /* sysfs - mkdir */
-static ssize_t create_store(const struct class *cls,
-                                        const struct class_attribute *attr,
+static ssize_t create_store(IPHONE_CLASS_ARG cls,
+                                        IPHONE_CLASS_ATTR_ARG attr,
                                         const char *buf, size_t count)
 {
     char name[64];
@@ -155,8 +156,8 @@ static ssize_t create_store(const struct class *cls,
 static CLASS_ATTR_WO(create);
 
 /* sysfs - rmdir */
-static ssize_t remove_store(const struct class *cls,
-                                        const struct class_attribute *attr,
+static ssize_t remove_store(IPHONE_CLASS_ARG cls,
+                                        IPHONE_CLASS_ATTR_ARG attr,
                                         const char *buf, size_t count)
 {
     char name[64];
@@ -354,7 +355,7 @@ int iphone_class_register()
 	int ret = 0;
 
     mutex_lock(&iphone_init_lock);
-    iphone_class = class_create("iphone");
+    iphone_class = IPHONE_CLASS_CREATE("iphone");
 
     if (IS_ERR(iphone_class)) {
 		mutex_unlock(&iphone_init_lock);

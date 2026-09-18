@@ -40,6 +40,14 @@ fn handle_mfi_server_client(mut stream: TcpStream, mfi_device: Arc<dyn MfiDevice
                 debug!("Generating challenge-response: done in {}ms", start.elapsed().as_millis());
                 buf
             }
+            0x03 => {
+                // Authentication digest selected by the chip itself. Clients
+                // require this instead of guessing from the certificate length,
+                // so a server without it fails loudly rather than silently
+                // signing with the wrong digest.
+                debug!("Responding to authentication digest request");
+                mfi_device.authentication_digest().map(|digest| vec![digest.to_wire()])
+            }
             _ => Err("Unknown command".into()),
         };
 

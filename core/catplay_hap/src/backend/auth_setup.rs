@@ -1,7 +1,7 @@
 use aes::Aes128;
 use aes::cipher::{KeyIvInit, StreamCipher};
 use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
-use catplay_mfi::MfiDevice;
+use catplay_mfi::{MfiAuthDigest, MfiDevice};
 use ctr::Ctr128BE;
 use log::debug;
 
@@ -156,12 +156,15 @@ impl MfiSapSession {
 
         // Hash (server_pubkey || client_pubkey)
         let cert = mfi.read_certificate().map_err(|e| e.to_string())?;
-        let digest = if cert.len() > 640 {
-            debug!("Old chip, using sha1 for auth-setup");
-            sha1_salt(server_pubkey.as_ref(), &client_pubkey).to_vec()
-        } else {
-            debug!("Modern chip, using sha256 for auth-setup");
-            sha256_salt(server_pubkey.as_ref(), &client_pubkey).to_vec()
+        let digest = match mfi.authentication_digest().map_err(|e| e.to_string())? {
+            MfiAuthDigest::Sha1 => {
+                debug!("MFi device selected SHA-1 for auth-setup");
+                sha1_salt(server_pubkey.as_ref(), &client_pubkey).to_vec()
+            }
+            MfiAuthDigest::Sha256 => {
+                debug!("MFi device selected SHA-256 for auth-setup");
+                sha256_salt(server_pubkey.as_ref(), &client_pubkey).to_vec()
+            }
         };
 
         // Sign with MFi
@@ -263,6 +266,10 @@ mod tests {
 
         fn generate_challenge_response(&self, challenge: &[u8]) -> MfiResult<Vec<u8>> {
             Ok(challenge.iter().copied().cycle().take(64).collect())
+        }
+
+        fn authentication_digest(&self) -> MfiResult<MfiAuthDigest> {
+            Ok(MfiAuthDigest::Sha1)
         }
     }
 

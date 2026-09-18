@@ -21,6 +21,14 @@ struct iap2_acc_accessory {
     char manufacturer[64];
     char product[64];
     char ifname[IFNAMSIZ];
+    /*
+     * udev renames the NCM netdev shortly after probe (eth0 -> enx<mac>), so the
+     * name snapshot above goes stale. ifindex survives renames and the live name
+     * is looked up from it on read. Do NOT hold a net_device reference here:
+     * keeping one past the accessory lifetime makes unregister_netdevice() spin
+     * forever waiting for the refcount to drop.
+     */
+    int ifindex;
     char iap2_devnode[64];
     struct completion disconnected;
     atomic_t gone;

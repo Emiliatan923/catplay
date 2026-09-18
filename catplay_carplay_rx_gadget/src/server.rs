@@ -12,7 +12,7 @@ use catplay_hap::HomekitStorageRef;
 use catplay_iap2_usb::GadgetError;
 use catplay_iap2_usb_gadget::{AccessoryError, AccessoryGadget, AccessoryStatus};
 use catplay_mfi::MfiDeficeRef;
-use catplay_util::{ArcBox, AsyncShutdown, EventReconciler, EventSleeper, Reconcilable, Reconciler, deadline_after, event_select, };
+use catplay_util::{ArcBox, AsyncShutdown, EventReconciler, EventSleeper, Reconcilable, Reconciler, deadline_after, event_select};
 use log::{debug, error, info, trace};
 use macaddr::MacAddr6;
 
@@ -147,10 +147,7 @@ impl<T: AirPlayReceiverSink> AsyncShutdown for CarPlayUsbGadget<T> {
 
 impl<T: AirPlayReceiverSink> EventSleeper for CarPlayUsbGadget<T> {
     async fn sleep(&mut self) -> Option<catplay_util::EventToken> {
-        event_select!(
-            self.usb_gadget,
-            deadline_after(Duration::from_millis(50))
-        )
+        event_select!(self.usb_gadget, deadline_after(Duration::from_millis(50)))
     }
 }
 
@@ -165,8 +162,8 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayUsbGadget<T> {
 
         if new.is_err() {
             debug!("Cleaning up due to error state");
-            self.server.take().shutdown().await; 
-            self.usb_gadget.take().shutdown().await; 
+            self.server.take().shutdown().await;
+            self.usb_gadget.take().shutdown().await;
         }
 
         new
@@ -229,7 +226,7 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayUsbGadget<T> {
                         display_name: "CatPlay".into(),
                         ncm_iface: Some(1),
                         is_usb_transport: true,
-                        has_gps: true,
+                        has_gps: false,
                         wants_now_playing: true,
                         ..CarPlaySessionIdentity::default()
                     };

@@ -25,9 +25,27 @@
 #include <linux/version.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
+/*
+ * WebUSB is optional. The Ingenic/V821 trees this module came from provide
+ * linux/usb/webusb.h, but the Rockchip 6.1 vendor kernel does not ship it and
+ * its composite gadget has no WebUSB fields either. Keep the descriptor
+ * support where the kernel offers it and fall back to the documented maximum
+ * otherwise; CatPlay emulates an Apple device and never advertises WebUSB.
+ */
+#if defined(__has_include)
+#if __has_include(<linux/usb/webusb.h>)
 #include <linux/usb/webusb.h>
+#define G_IPHONE_HAVE_WEBUSB 1
+#endif
+#endif
+
+#ifndef WEBUSB_URL_RAW_MAX_LENGTH
+#define WEBUSB_URL_RAW_MAX_LENGTH 255
+#endif
 #include <linux/log2.h>
 #include <linux/configfs.h>
+
+#include "kver_compat.h"
 
 /*
  * USB function drivers should return USB_GADGET_DELAYED_STATUS if they

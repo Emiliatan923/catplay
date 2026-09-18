@@ -16,7 +16,6 @@ pub struct PhoneGadget {
     phone_bridge: Arc<PhoneGadgetDriver>,
     dirty: bool,
 
-    udc: String,
     binding: bool,
 }
 
@@ -50,7 +49,11 @@ impl PhoneGadget {
 
 impl PhoneGadget {
     pub fn new(device_name: &str, take_over: bool, udc: &str) -> GadgetResult<Self> {
-        let phone_bridge = Arc::new(PhoneGadgetDriver::new(device_name, take_over, udc)?);
+        Self::new_with_serial(device_name, take_over, udc, None)
+    }
+
+    pub fn new_with_serial(device_name: &str, take_over: bool, udc: &str, serial: Option<&str>) -> GadgetResult<Self> {
+        let phone_bridge = Arc::new(PhoneGadgetDriver::new_with_serial(device_name, take_over, udc, serial)?);
         let status_notify =
             SysfsNotify::open(phone_bridge.status_path()).map_err(|err| GadgetError::FailedGadgetStatusCheck(err.into()))?;
 
@@ -61,7 +64,6 @@ impl PhoneGadget {
             dirty: true,
 
             binding: false,
-            udc: udc.into(),
         };
 
         Ok(handle)
@@ -108,7 +110,7 @@ impl EventReconciler for PhoneGadget {
             debug!("New phone status: {new_status:?}");
 
             if let Some(accessory) = new_status.as_accessory()
-                && let Some(interface) = accessory.ncm
+                && let Some(interface) = accessory.ncm_ifname
             {
                 let _ = NcmHelper::release_from_network_manager(&interface);
             }

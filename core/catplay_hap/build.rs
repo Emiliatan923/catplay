@@ -27,6 +27,15 @@ fn main() {
     build.include(&out_dir);
     build.include("asm");
     build.warnings(false);
+    // The imported BoringSSL AArch64 sources normally receive these PAC/BTI
+    // macros from BoringSSL's generated build. This standalone build has no
+    // generated config, and the AArch64 parts we ship (Cortex-A53 class) do not
+    // require pointer authentication, so define them as empty.
+    if arch == "aarch64" && os == "linux" {
+        build.define("AARCH64_SIGN_LINK_REGISTER", Some(""));
+        build.define("AARCH64_VALIDATE_LINK_REGISTER", Some(""));
+        build.define("AARCH64_VALID_CALL_TARGET", Some(""));
+    }
 
     // 3) Pick the right .S file (or fallback)
     let src_s = match (arch.as_str(), os.as_str()) {

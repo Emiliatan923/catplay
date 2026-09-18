@@ -12,7 +12,9 @@ use catplay_hap::HomekitStorageRef;
 use catplay_iap2_bt::{BluetoothError, BluetoothManager};
 use catplay_iap2_usb::{GadgetError, NcmHelper};
 use catplay_mfi::MfiDeficeRef;
-use catplay_util::{AbortOnDropHandle, ArcBox, AsyncShutdown, EventSleeper, Reconcilable, Reconciler, deadline_after, event_select, sleep, spawn};
+use catplay_util::{
+    AbortOnDropHandle, ArcBox, AsyncShutdown, EventSleeper, Reconcilable, Reconciler, deadline_after, event_select, sleep, spawn,
+};
 use log::{debug, error, info, trace, warn};
 use macaddr::MacAddr6;
 
@@ -291,6 +293,14 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayWirelessGadget<T> {
         self.load_bt_last_connect();
         self.sync_bt_last_connect();
 
+        // bluetoothd drops RFCOMM profiles on restart. Entering the normal
+        // error/retry path recreates BluetoothManager and re-registers iAP2.
+        if let Some(bluetooth) = self.bluetooth.as_ref()
+            && let Err(error) = bluetooth.healthcheck().await
+        {
+            return Err(LocalError::Bluetooth(error.into()));
+        }
+
         // Healthcheck - AirPlay server
         if let Some(_server) = self.server.as_ref() {
             // TODO - detect accept() failures
@@ -337,7 +347,7 @@ impl<T: AirPlayReceiverSink> Reconcilable for CarPlayWirelessGadget<T> {
                     wifi_is_wpa: self.wpa,
                     wifi_channel: self.channel,
                     is_usb_transport: false,
-                    has_gps: true,
+                    has_gps: false,
                     wants_now_playing: false,
                     ..CarPlaySessionIdentity::default()
                 };

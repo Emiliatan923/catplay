@@ -18,8 +18,6 @@
 
 #include "composite.h"
 #include <linux/usb/otg.h>
-#include <linux/usb/webusb.h>
-#include <linux/unaligned.h>
 
 #include "u_os_desc.h"
 
@@ -916,6 +914,7 @@ static int bos_desc(struct usb_composite_dev *cdev)
         }
     }
 
+#ifdef G_IPHONE_HAVE_WEBUSB
     /* The WebUSB Platform Capability descriptor */
     if (cdev->use_webusb)
     {
@@ -947,6 +946,7 @@ static int bos_desc(struct usb_composite_dev *cdev)
         else
             webusb_cap_data->iLandingPage = WEBUSB_LANDING_PAGE_NOT_PRESENT;
     }
+#endif /* G_IPHONE_HAVE_WEBUSB */
 
     return le16_to_cpu(bos->wTotalLength);
 }
@@ -2268,6 +2268,7 @@ int composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctr
             goto check_value;
         }
 
+#ifdef G_IPHONE_HAVE_WEBUSB
         /*
          * WebUSB URL descriptor handling, following:
          * https://wicg.github.io/webusb/#device-requests
@@ -2316,6 +2317,7 @@ int composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctr
 
             goto check_value;
         }
+#endif /* G_IPHONE_HAVE_WEBUSB */
 
         VDBG(cdev,
              "non-core control req%02x.%02x v%04x i%04x l%d\n",

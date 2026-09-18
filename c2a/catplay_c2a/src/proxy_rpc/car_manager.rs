@@ -50,6 +50,7 @@ pub struct CarManager {
 
     error: Option<CarManagerError>,
     proxy_rx: mpsc::UnboundedReceiver<TxAdapterOp>,
+    bluetooth_adapter: String,
 }
 
 struct IphonePeer {
@@ -78,13 +79,15 @@ impl CarManager {
         car: TeardownGuard<AirPlayTransmitterProxyRef>,
         proxy_rx: mpsc::UnboundedReceiver<TxAdapterOp>,
         persist_dir: Option<PathBuf>,
+        bluetooth_adapter: impl Into<String>,
     ) -> RtspResult<Self> {
         let info = car.info_cached();
         let car_media_clock = car.media_clock();
         let screen = info.displays.first().ok_or(RtspError::Unknown)?;
 
         let (width, height, dpi) = (screen.width_pixels, screen.height_pixels, screen.dpi());
-        let overlay = OverlayManager::new(width, height, dpi, persist_dir);
+        let bluetooth_adapter = bluetooth_adapter.into();
+        let overlay = OverlayManager::new(width, height, dpi, persist_dir, &bluetooth_adapter);
 
         Ok(Self {
             car_media_clock,
@@ -101,6 +104,7 @@ impl CarManager {
             pending_screen_setup: Default::default(),
             car_state: car,
             proxy_rx,
+            bluetooth_adapter,
             tx_current: None,
         })
     }
@@ -437,6 +441,7 @@ impl CarManager {
             CommandType::DuckAudio | CommandType::UnduckAudio | CommandType::HidSetInputMode | CommandType::RequestUI => true,
             CommandType::DisableBluetooth => {
                 let command = command.clone();
+                let adapter = self.bluetooth_adapter.clone();
                 let task = spawn(async move {
                     let Command::DisableBluetooth(cmd) = command else {
                         return;
@@ -444,7 +449,7 @@ impl CarManager {
 
                     if let Ok(id) = MacAddr6::from_str(&cmd.device_id) {
                         warn!("Disconnecting BT peer: {id}");
-                        let _ = BluezManager::new().disconnect_peer("hci0", id).await;
+                        let _ = BluezManager::new().disconnect_peer(&adapter, id).await;
                     }
                 });
                 task.detach();

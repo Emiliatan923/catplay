@@ -2,10 +2,13 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/container_of.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/usb.h>
 #include <linux/fs.h>
 #include <linux/sysfs.h>
-#include <linux/kmod.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 
@@ -14,68 +17,17 @@
 
 #define IPHONE_ROLE_SWITCH_REBIND_DEBOUNCE_MS 1000
 #define IPHONE_ROLE_SWITCH_HOST_DELAY_MS 70
-#define IPHONE_RECOVERY_COMMAND "/usr/bin/carlinkit_otalib usboot"
-#define IPHONE_RECOVERY_COMMAND_GADGET "/usr/bin/carlinkit_otalib gadget"
 
 static int iphone_dev_set_otg_role(struct g_iphone *iphone_gadget,
 					       enum usb_role role);
-static int iphone_dev_start_recovery(struct g_iphone *iphone_gadget);
-static int iphone_dev_start_gadget(struct g_iphone *iphone_gadget);
 static int iphone_dev_set_otg_role_internal(struct iphone_dev_data *data,
 					    enum usb_role role,
 					    bool manage_gadget_lifecycle);
 static void iphone_dev_status_notify_workfn(struct work_struct *work);
 static void iphone_dev_role_switch_rebind_workfn(struct work_struct *work);
-static void iphone_dev_recovery_workfn(struct work_struct *work);
+static bool iphone_dev_has_role_switch(struct iphone_dev_data *data);
 static const char *iphone_dev_role_switch_name(const char *gadget_name);
 static int iphone_dev_update_role_switch_name_from_gadget(struct iphone_dev_data *data);
-
-static int iphone_dev_launch_recovery_process(const char *command)
-{
-	char *launcher_command;
-	char *argv[] = {
-		"/bin/sh",
-		"-c",
-		NULL,
-		NULL
-	};
-	char *envp[] = {
-		"HOME=/",
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-		"TERM=linux",
-		NULL
-	};
-	int ret;
-
-	launcher_command = kasprintf(GFP_KERNEL,
-				      "(%s </dev/null >/dev/null 2>&1 &)",
-				      command);
-	if (!launcher_command)
-		return -ENOMEM;
-
-	argv[2] = launcher_command;
-
-	pr_info("iPhone: launching detached recovery process (fork/disown style)\n");
-	ret = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
-	if (ret)
-		pr_err("iPhone: userspace exec failed: %d\n", ret);
-	else
-		pr_info("iPhone: detached recovery launcher finished\n");
-
-	kfree(launcher_command);
-	return ret;
-}
-
-static void iphone_dev_recovery_workfn(struct work_struct *work)
-{
-	struct iphone_dev_data *data =
-		container_of(to_delayed_work(work), struct iphone_dev_data,
-			     recovery_work);
-
-	pr_info("iPhone: processing deferred recovery request\n");
-	iphone_dev_launch_recovery_process(data->recovery_command);
-	data->recovery_work_scheduled = false;
-}
 
 static void iphone_dev_notify_status_changed(struct g_iphone *iphone_gadget)
 {
@@ -159,10 +111,12 @@ static int iphone_dev_bind_gadget(struct iphone_dev_data *data)
 	if (data->driver_registered)
 		return 0;
 
-	/* Before bind, always enter USB_ROLE_DEVICE */
-	ret = iphone_dev_set_otg_role_internal(data, USB_ROLE_DEVICE, false);
-	if (ret) {
-		return ret;
+	/* Before a rebind, always enter USB_ROLE_DEVICE. The first bind relies on
+	 * the DT role-switch-default-mode because cdev does not exist yet. */
+	if (iphone_dev_has_role_switch(data)) {
+		ret = iphone_dev_set_otg_role_internal(data, USB_ROLE_DEVICE, false);
+		if (ret)
+			return ret;
 	}
 
 	pr_info("iPhone: registering gadget\n");
@@ -244,39 +198,21 @@ static int iphone_dev_set_otg_role(struct g_iphone *iphone_gadget,
 	return iphone_dev_set_otg_role_internal(data, role, true);
 }
 
-static int iphone_dev_start_command(struct g_iphone *iphone_gadget,
-				    const char *command)
-{
-	struct iphone_dev_data *data =
-		container_of(iphone_gadget, struct iphone_dev_data, g);
-
-	if (data->recovery_work_scheduled) {
-		pr_info("iPhone: recovery request ignored (already queued)\n");
-		return 0;
-	}
-
-	data->recovery_command = command;
-	data->recovery_work_scheduled = true;
-	pr_info("iPhone: recovery requested, scheduling deferred handler\n");
-	if (!schedule_delayed_work(&data->recovery_work, 0)) {
-		pr_info("iPhone: recovery request ignored (already scheduled)\n");
-		data->recovery_work_scheduled = false;
-	}
-	return 0;
-}
-
-static int iphone_dev_start_recovery(struct g_iphone *iphone_gadget)
-{
-	return iphone_dev_start_command(iphone_gadget, IPHONE_RECOVERY_COMMAND);
-}
-
-static int iphone_dev_start_gadget(struct g_iphone *iphone_gadget)
-{
-	return iphone_dev_start_command(iphone_gadget,
-					IPHONE_RECOVERY_COMMAND_GADGET);
-}
-
-
+/*
+ * Role switching is required by the CarPlay dongle protocol: the gadget first
+ * enumerates as an Apple device (05ac:12a8) and, once the head unit sends the
+ * 0x51 vendor request, the dongle must flip to USB_HOST and enumerate the
+ * head unit's iAP2 + NCM interfaces.
+ *
+ * Two mechanisms are supported, in order of preference:
+ *   1. the fwnode-backed usb_role_switch handle (dwc2/dwc3 with a DT
+ *      role-switch description), and
+ *   2. the usb_role class in sysfs, addressed by role-switch name, which is
+ *      how some vendor kernels (e.g. V821/MUSB) expose the same control.
+ *
+ * There is deliberately no userspace "recovery" helper anymore: the old
+ * carlinkit_otalib fallback hid real role-switch failures.
+ */
 static const char *iphone_dev_role_switch_name(const char *gadget_name)
 {
 	if (!gadget_name || !gadget_name[0])
@@ -314,19 +250,143 @@ static int iphone_dev_update_role_switch_name_from_gadget(struct iphone_dev_data
 	return 0;
 }
 
-static int set_usb_role(struct iphone_dev_data *data, enum usb_role role)
+/*
+ * Path of the Rockchip USB2 PHY's otg_mode attribute for this controller.
+ *
+ * This is the control that actually works on rk3528: the PHY forces the iddig
+ * line through the GRF, and the SoC's OTG state machine - which is what decides
+ * the role once the DT says dr_mode = "otg" - reacts to that. Measured on a
+ * ROCK 2A: writing only the controller's dwc3 debugfs "mode" switches it to
+ * host and the state machine pulls it back within a second, while writing this
+ * PHY attribute first holds. The PHY is the extcon provider named by the
+ * controller's "extcon" property, so follow that phandle to its sysfs dir.
+ */
+static bool iphone_dev_rockchip_phy_mode_path(struct iphone_dev_data *data, char *path, size_t size)
 {
-	struct file *role_file;
-	char role_path[256];
-	const char *role_str;
-	const char *rs_name;
-	size_t role_len;
-	ssize_t written;
-	loff_t pos = 0;
+	struct device *controller = NULL;
+	struct device_node *phy_np;
+	struct platform_device *phy_pdev;
+	bool own_ref = false;
+	int len;
+	bool ok = false;
+
+	/*
+	 * Resolved once and then reused: the role switch unbinds the gadget
+	 * before flipping, and cdev->gadget is gone by then.
+	 */
+	if (data->rockchip_phy_mode_path[0]) {
+		strscpy(path, data->rockchip_phy_mode_path, size);
+		return true;
+	}
+
+	if (data->cdev && data->cdev->gadget) {
+		controller = data->cdev->gadget->dev.parent;
+		if (!controller)
+			controller = &data->cdev->gadget->dev;
+	}
+
+	/*
+	 * The first bind can fail, and the role switch unbinds the gadget before
+	 * flipping, so cdev is not a reliable way to reach the controller. Its
+	 * platform device is named after the UDC, which is always known.
+	 */
+	if ((!controller || !controller->of_node) && data->udc[0]) {
+		controller = bus_find_device_by_name(&platform_bus_type, NULL, data->udc);
+		own_ref = controller != NULL;
+	}
+
+	if (!controller || !controller->of_node)
+		goto out;
+
+	phy_np = of_parse_phandle(controller->of_node, "extcon", 0);
+	if (!phy_np)
+		goto out;
+
+	phy_pdev = of_find_device_by_node(phy_np);
+	of_node_put(phy_np);
+	if (!phy_pdev)
+		goto out;
+
+	len = snprintf(path, size, "/sys/devices/platform/%s/otg_mode", dev_name(&phy_pdev->dev));
+	if (len > 0 && (size_t)len < size) {
+		strscpy(data->rockchip_phy_mode_path, path, sizeof(data->rockchip_phy_mode_path));
+		ok = true;
+	}
+
+	put_device(&phy_pdev->dev);
+
+out:
+	if (own_ref && controller)
+		put_device(controller);
+	return ok;
+}
+
+static bool path_is_openable(const char *path)
+{
+	struct file *file = filp_open(path, O_RDONLY, 0);
+
+	if (IS_ERR(file))
+		return false;
+	filp_close(file, NULL);
+	return true;
+}
+
+/*
+ * True when a role-switch mechanism is actually usable right now.
+ *
+ * Every mechanism is probed for real - a configured UDC name alone proves
+ * nothing, and treating it as a working switch is what made the first bind fail
+ * with -ENODEV earlier. When none is usable the controller keeps its DT default
+ * role instead of failing the bind.
+ */
+static bool iphone_dev_has_role_switch(struct iphone_dev_data *data)
+{
+	char path[256];
 	int len;
 
-	if (!data)
-		return -EINVAL;
+	if (data->role_switch)
+		return true;
+
+	if (data->role_switch_name[0]) {
+		len = snprintf(path, sizeof(path), "/sys/class/usb_role/%s-role-switch/role",
+			       data->role_switch_name);
+		if (len > 0 && (size_t)len < sizeof(path) && path_is_openable(path))
+			return true;
+	}
+
+	if (iphone_dev_rockchip_phy_mode_path(data, path, sizeof(path)) && path_is_openable(path))
+		return true;
+
+	return false;
+}
+
+static int write_sysfs_string(const char *path, const char *value)
+{
+	struct file *file;
+	loff_t pos = 0;
+	size_t len = strlen(value);
+	ssize_t written;
+
+	file = filp_open(path, O_WRONLY, 0);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
+
+	written = kernel_write(file, value, len, &pos);
+	filp_close(file, NULL);
+	if (written < 0)
+		return written;
+	if ((size_t)written != len)
+		return -EIO;
+
+	return 0;
+}
+
+static int set_usb_role_sysfs(struct iphone_dev_data *data, enum usb_role role)
+{
+	char role_path[256];
+	const char *role_str;
+	int len;
+	int ret;
 
 	switch (role) {
 	case USB_ROLE_HOST:
@@ -340,31 +400,107 @@ static int set_usb_role(struct iphone_dev_data *data, enum usb_role role)
 	}
 
 	if (iphone_dev_update_role_switch_name_from_gadget(data) &&
-	    (!data->role_switch_name[0])) {
+	    (!data->role_switch_name[0]))
 		return -ENODEV;
-	}
-	rs_name = data->role_switch_name;
-	role_len = strlen(role_str);
 
 	len = snprintf(role_path, sizeof(role_path),
-		       "/sys/class/usb_role/%s-role-switch/role", rs_name);
+		       "/sys/class/usb_role/%s-role-switch/role",
+		       data->role_switch_name);
 	if (len < 0 || (size_t)len >= sizeof(role_path))
 		return -ENAMETOOLONG;
 
-	role_file = filp_open(role_path, O_WRONLY, 0);
-	if (IS_ERR(role_file))
-		return PTR_ERR(role_file);
+	ret = write_sysfs_string(role_path, role_str);
+	if (ret)
+		return ret;
 
-	written = kernel_write(role_file, role_str, role_len, &pos);
-	filp_close(role_file, NULL);
-	if (written < 0)
-		return written;
-	if ((size_t)written != role_len)
-		return -EIO;
-
-	pr_info("iPhone: setting usb role: %s -> %s\n", role_path, role_str);
-
+	pr_info("iPhone: setting usb role via sysfs: %s -> %s\n",
+		role_path, role_str);
 	return 0;
+}
+
+/*
+ * Rockchip rk3528: drive the role through the USB2 PHY.
+ *
+ * The PHY's otg_mode attribute forces the iddig line through the GRF, and the
+ * SoC's OTG state machine reacts to that by switching the controller. Writing
+ * the PHY first is what makes the change stick - see the comment on
+ * iphone_dev_rockchip_phy_mode_path().
+ */
+static int set_usb_role_via_rockchip_phy(struct iphone_dev_data *data, enum usb_role role)
+{
+	const char *value = (role == USB_ROLE_HOST) ? "host" : "peripheral";
+	char path[256];
+
+	if (!iphone_dev_rockchip_phy_mode_path(data, path, sizeof(path)))
+		return -ENODEV;
+
+	return write_sysfs_string(path, value);
+}
+
+static int set_usb_role(struct iphone_dev_data *data, enum usb_role role)
+{
+	struct device *controller;
+	int ret;
+
+	if (!data)
+		return -EINVAL;
+
+	if (role != USB_ROLE_HOST && role != USB_ROLE_DEVICE)
+		return -EINVAL;
+
+	/*
+	 * The fwnode lookup needs the controller, which is only reachable while
+	 * the gadget is registered. It is resolved once and kept; the other
+	 * mechanisms below do not need it at all, so do not fail here - the role
+	 * switch unbinds the gadget before flipping, and cdev->gadget is NULL by
+	 * then.
+	 */
+	if (!data->role_switch && data->cdev && data->cdev->gadget) {
+		controller = data->cdev->gadget->dev.parent;
+		if (!controller)
+			controller = &data->cdev->gadget->dev;
+		data->role_switch = usb_role_switch_find_by_fwnode(dev_fwnode(controller));
+	}
+
+	if (data->role_switch) {
+		ret = usb_role_switch_set_role(data->role_switch, role);
+		if (ret)
+			return ret;
+		if (usb_role_switch_get_role(data->role_switch) != role)
+			return -EIO;
+
+		pr_info("iPhone: USB role switched to %s\n", usb_role_string(role));
+		return 0;
+	}
+
+	/* Boards that expose the usb_role class instead of a fwnode handle. */
+	ret = set_usb_role_sysfs(data, role);
+	if (!ret) {
+		pr_info("iPhone: USB role switched to %s via usb_role class\n",
+			usb_role_string(role));
+		return 0;
+	}
+	if (ret != -ENODEV && ret != -ENOENT)
+		return ret;
+
+	/*
+	 * Rockchip rk3528: its PHY otg_mode is what the OTG state machine listens
+	 * to, and the controller follows it. Measured on a ROCK 2A - writing the
+	 * controller's debugfs "mode" instead switches it and the state machine
+	 * pulls it back within a second, and a kernel_write() to that debugfs file
+	 * fails outright ("kernel write not supported"), so the PHY is the only
+	 * mechanism that works there.
+	 */
+	ret = set_usb_role_via_rockchip_phy(data, role);
+	if (!ret) {
+		pr_info("iPhone: USB role switched to %s via Rockchip PHY otg_mode\n",
+			usb_role_string(role));
+		return 0;
+	}
+
+	pr_err("iPhone: no usable USB role switch for UDC '%s' (%d): set dr_mode = \"otg\" in the DT and provide either a usb_role class entry or a Rockchip USB2 PHY otg_mode attribute\n",
+	       data->udc[0] ? data->udc : "<auto>", ret);
+	return ret;
 }
 
 
@@ -404,11 +540,12 @@ static int iphone_dev_set_otg_role_internal(struct iphone_dev_data *data,
 
 	ret = set_usb_role(data, role);
 	if (ret) {
-		pr_warn("iPhone: failed OTG override hack: %d\n", ret);
-	} else {
-		data->otg_role_device_cached = role_is_device;
-		data->otg_role_cache_valid = true;
+		pr_warn("iPhone: failed to switch USB role to %s: %d\n",
+			usb_role_string(role), ret);
+		return ret;
 	}
+	data->otg_role_device_cached = role_is_device;
+	data->otg_role_cache_valid = true;
 
 	pr_info("iPhone: set OTG role '%s'\n", usb_role_string(role));
 
@@ -437,11 +574,13 @@ static void iphone_dev_role_switch_work(struct work_struct *work)
 		data->role_switch_rebind_scheduled = false;
 	}
 
-	// msleep(IPHONE_ROLE_SWITCH_HOST_DELAY_MS);
+	/* Complete the EP0 status stage before tearing down the UDC. */
+	msleep(IPHONE_ROLE_SWITCH_HOST_DELAY_MS);
 
-	if (iphone_dev_set_otg_role_internal(data, USB_ROLE_HOST, false)) {
-	// if (iphone_dev_set_otg_role(&data->g, USB_ROLE_HOST)) {
+	if (iphone_dev_set_otg_role_internal(data, USB_ROLE_HOST, true)) {
 		pr_warn("iPhone: role-switch host transition failed\n");
+		if (iphone_dev_bind_gadget(data))
+			pr_err("iPhone: failed to restore device gadget after role-switch failure\n");
 		data->g.role_switch_requested = false;
 		g_iphone_set_status(&data->g, Initial);
 		data->role_switch_work_scheduled = false;
@@ -465,7 +604,6 @@ static void iphone_dev_role_switch_work(struct work_struct *work)
 
 		data->g.role_switch_requested = false;
 		g_iphone_set_status(&data->g, RoleSwitchFailed);
-		msleep(1000); // TODO [hack]
 		data->role_switch_rebind_scheduled = true;
 		mod_delayed_work(system_wq, &data->role_switch_rebind_work,
 				 msecs_to_jiffies(IPHONE_ROLE_SWITCH_REBIND_DEBOUNCE_MS));
@@ -507,9 +645,43 @@ static int iphone_dev_driver_bind(struct usb_composite_dev *cdev)
 	struct iphone_dev_driver *ipdrv =
 		container_of(cdev->driver, struct iphone_dev_driver, drv);
 	struct iphone_dev_data *data = ipdrv->data;
+	struct device *controller;
 	data->cdev = cdev;
 	data->gadget_registered = true;
-	iphone_dev_update_role_switch_name_from_gadget(data);
+	controller = cdev->gadget->dev.parent;
+	if (!controller)
+		controller = &cdev->gadget->dev;
+	if (!data->role_switch)
+		data->role_switch = usb_role_switch_find_by_fwnode(dev_fwnode(controller));
+
+	/*
+	 * Resolve the Rockchip PHY path now, while the controller is still
+	 * reachable. The role switch unbinds the gadget before flipping, and
+	 * cdev->gadget is NULL by then, so this is the only chance to find it.
+	 */
+	{
+		char phy_path[256];
+
+		(void)iphone_dev_rockchip_phy_mode_path(data, phy_path, sizeof(phy_path));
+	}
+
+	if (!data->role_switch) {
+		/*
+		 * No fwnode-backed switch. Accept a usb_role class entry named
+		 * after the UDC, or a Rockchip USB2 PHY otg_mode attribute, instead;
+		 * if neither exists the 0x51 handshake can never flip this port to
+		 * host, so make that explicit rather than failing later with a
+		 * confusing role-switch error.
+		 */
+		iphone_dev_update_role_switch_name_from_gadget(data);
+		if (!iphone_dev_has_role_switch(data)) {
+			pr_err("iPhone: no USB role switch for UDC '%s': set dr_mode = \"otg\" in the DT (which needs an extcon or usb-role-switch property), or provide a usb_role class entry / DT role-switch provider\n",
+			       data->udc[0] ? data->udc : "<auto>");
+			return -EPROBE_DEFER;
+		}
+		pr_info("iPhone: using usb_role sysfs fallback '%s'\n",
+			data->role_switch_name);
+	}
 
 	pr_info("iPhone: driver binding 4 configurations\n");
 
@@ -615,6 +787,7 @@ struct iphone_dev_data *iphone_dev_alloc(struct device *owner_dev, char *udc_nam
 		const char *rs_name;
 
 		strscpy(data->udc, udc_name, sizeof(data->udc));
+		/* Lets the usb_role sysfs fallback work before cdev exists. */
 		rs_name = iphone_dev_role_switch_name(udc_name);
 		if (rs_name)
 			strscpy(data->role_switch_name, rs_name,
@@ -640,19 +813,16 @@ struct iphone_dev_data *iphone_dev_alloc(struct device *owner_dev, char *udc_nam
 	data->otg_role_cache_valid = false;
 	data->g.set_otg_role = iphone_dev_set_otg_role;
 	data->g.start_role_switch_probe = iphone_dev_start_role_switch_probe;
-	data->g.start_recovery = iphone_dev_start_recovery;
-	data->g.start_gadget = iphone_dev_start_gadget;
 	data->g.notify_status_changed = iphone_dev_notify_status_changed;
 	INIT_WORK(&data->status_notify_work, iphone_dev_status_notify_workfn);
 	INIT_WORK(&data->role_switch_work, iphone_dev_role_switch_work);
-	INIT_DELAYED_WORK(&data->recovery_work, iphone_dev_recovery_workfn);
 	INIT_DELAYED_WORK(&data->role_switch_rebind_work,
 			  iphone_dev_role_switch_rebind_workfn);
 	INIT_DELAYED_WORK(&data->accessory_watch_work,
 			  iphone_dev_accessory_watch_work);
 
-	pr_info("iPhone: initial gadget bind with udc_name '%s' rs_name '%s'\n",
-		udc_name, data->role_switch_name[0] ? data->role_switch_name : "<unset>");
+	pr_info("iPhone: initial gadget bind with udc_name '%s'\n",
+		udc_name ? udc_name : "<auto>");
 
 	ret = iphone_dev_bind_gadget(data);
 	if (ret) {
@@ -664,9 +834,13 @@ struct iphone_dev_data *iphone_dev_alloc(struct device *owner_dev, char *udc_nam
 	return data;
 
 fail:
-	kfree(data->driver);
-	kfree(data->stringtab);
-	kfree(data);
+	if (data) {
+		if (data->role_switch)
+			usb_role_switch_put(data->role_switch);
+		kfree(data->driver);
+		kfree(data->stringtab);
+		kfree(data);
+	}
 	return ERR_PTR(ret);
 }
 
@@ -677,12 +851,10 @@ static void iphone_dev_stop_runtime(struct iphone_dev_data *data)
 
 	cancel_delayed_work_sync(&data->accessory_watch_work);
 	cancel_delayed_work_sync(&data->role_switch_rebind_work);
-	cancel_delayed_work_sync(&data->recovery_work);
 	cancel_work_sync(&data->role_switch_work);
 	cancel_work_sync(&data->status_notify_work);
 	data->role_switch_work_scheduled = false;
 	data->role_switch_rebind_scheduled = false;
-	data->recovery_work_scheduled = false;
 
 	mutex_lock(&data->lock);
 	iphone_dev_clear_accessory_locked(data);
@@ -699,6 +871,10 @@ int iphone_dev_free(struct iphone_dev_data *data) {
 	pr_debug("iPhone: calling gadget unregister\n");
 	iphone_dev_unbind_gadget(data);
 	cancel_work_sync(&data->status_notify_work);
+	if (data->role_switch) {
+		usb_role_switch_put(data->role_switch);
+		data->role_switch = NULL;
+	}
 	
 	/* This code has been checked several times to verify there is no potential for UAF */
 	kfree(data->stringtab);

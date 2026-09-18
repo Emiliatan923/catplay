@@ -22,7 +22,7 @@ x264-sys = { version = "0.2.3", optional = true }
 openh264 = { version = "0.9.3", optional = true }
 openh264-sys2 = { version = "0.9.3", optional = true }
 turbojpeg = { version = "1.4.0", default-features = false, features = [
-    "pkg-config",
+    "cmake",
 ] }
 
 [features]

@@ -585,6 +585,7 @@ version = "0.1.0"
 dependencies = [
  "libc 0.2.189",
  "log",
+ "openssl",
  "socket2",
  "thiserror 2.0.18",
 ]
@@ -2888,8 +2889,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2d87290369f91af10f425f9ec0b8ce775cf79ea189291faa974c0b4e02e1e2f"
 dependencies = [
  "anyhow",
+ "cmake",
  "libc 0.2.189",
- "pkg-config",
 ]
 
 [[package]]

@@ -8,29 +8,34 @@ use log::{debug, warn};
 use std::time::Duration;
 
 pub struct OverlayPolicyDefault {
+    adapter: String,
     bluez: LazyAsync<BluezManager>,
     peer: OverlayPeerState,
     overlay: Option<UiState>,
 }
 
 impl OverlayPolicyDefault {
-    pub fn new() -> Self {
+    pub fn new(adapter: impl Into<String>) -> Self {
+        let adapter = adapter.into();
         Self {
-            bluez: LazyAsync::new(Self::start_pin_agent),
+            adapter: adapter.clone(),
+            bluez: LazyAsync::new(move || Self::start_pin_agent(adapter)),
             peer: OverlayPeerState::Unconnected,
             overlay: None,
         }
     }
-    async fn start_pin_agent() -> BluezManager {
+    async fn start_pin_agent(adapter: String) -> BluezManager {
         loop {
             let mut mgr = BluezManager::new();
             match mgr.register_pin_agent().await {
                 Ok(()) => {
-                    if let Err(err) = mgr.set_discoverable("hci0", true).await {
-                        warn!("Failed to set BlueZ adapter discoverable: {err}");
+                    // The iPhone finds the accessory by scanning, so both
+                    // properties must stay enabled for wireless pairing.
+                    if let Err(err) = mgr.set_discoverable(&adapter, true).await {
+                        warn!("Failed to set BlueZ adapter discoverable on {adapter}: {err}");
                     }
-                    if let Err(err) = mgr.set_pairable("hci0", true).await {
-                        warn!("Failed to set BlueZ adapter pairable: {err}");
+                    if let Err(err) = mgr.set_pairable(&adapter, true).await {
+                        warn!("Failed to set BlueZ adapter pairable on {adapter}: {err}");
                     }
                     return mgr;
                 }
@@ -82,6 +87,16 @@ impl EventReconciler for OverlayPolicyDefault {
     type Error = ();
 
     async fn reconcile(&mut self) -> Result<(), Self::Error> {
+        let bluez_failed = if let Some(bluez) = self.bluez.as_ref().as_ref() {
+            bluez.get_address(&self.adapter).await.is_err()
+        } else {
+            false
+        };
+        if bluez_failed {
+            warn!("BlueZ restarted; re-registering the pairing agent");
+            let adapter = self.adapter.clone();
+            self.bluez = LazyAsync::new(move || Self::start_pin_agent(adapter));
+        }
         self.overlay = self.overlay();
         Ok(())
     }

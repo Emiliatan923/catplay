@@ -15,7 +15,7 @@ use log::{debug, error, info};
 use catplay_iap2_usb::{GadgetError, GadgetResult};
 use uuid::Uuid;
 
-use crate::{AccessoryData, GadgetStatus, phone_gadget::PhoneGadget};
+use crate::{AccessoryData, CarUsbTransport, GadgetStatus, phone_gadget::PhoneGadget, phone_gadget_driver::PhoneGadgetDriver};
 
 #[derive(Debug, thiserror::Error, PartialEq, Clone)]
 pub enum CarPlayPhoneGadgetError {
@@ -23,6 +23,8 @@ pub enum CarPlayPhoneGadgetError {
     AccessoryFailedRoleSwitch,
     #[error("Accessory failed to negotiate iAP2 session")]
     AccessoryFailedToInitIAp2,
+    #[error("Accessory iAP2 device could not be opened at {path}: {error}")]
+    AccessoryFailedToOpenIAp2 { path: String, error: String },
     #[error("Accessory claimed to offer CarPlay NCM interface, but it failed to bind: {0}")]
     AccessoryFailedNCM(GadgetError),
     #[error("Accessory has failed to notice our gadget, and all USB reset attempts have been exhausted")]
@@ -105,6 +107,7 @@ impl From<CarPlayPhoneGadgetStatus> for PhoneState {
 
 pub struct CarPlayPhoneGadget {
     iphone_instance: String,
+    iphone_serial: Option<String>,
 
     /// Forcefully pin roles in a way that bypasses the role-switch flow.
     ///
@@ -136,6 +139,16 @@ impl CarPlayPhoneGadget {
         pinned: bool,
         cb: F,
     ) -> GadgetResult<Reconciler<Self>> {
+        Self::new_with_csm_identity(udc, iphone_instance, None, pinned, cb)
+    }
+
+    pub fn new_with_csm_identity<T: CsmSession, F: Fn() -> T + Send + Sync + 'static>(
+        udc: Option<&str>,
+        iphone_instance: &str,
+        iphone_serial: Option<&str>,
+        pinned: bool,
+        cb: F,
+    ) -> GadgetResult<Reconciler<Self>> {
         let udc = UdcHelper::resolve_udc_name(udc)?;
         if UdcHelper::requires_udc(true, pinned) && udc.is_none() {
             return Err(GadgetError::MissingUdc);
@@ -144,6 +157,7 @@ impl CarPlayPhoneGadget {
         let csm: CsmSessionCallback = Arc::new(move || Box::new(cb()));
         let me = Self {
             iphone_instance: iphone_instance.into(),
+            iphone_serial: iphone_serial.map(str::to_owned),
             pinned,
             udc,
             gadget: None,
@@ -157,16 +171,27 @@ impl CarPlayPhoneGadget {
         Ok(Reconciler::new(me, Ok(CarPlayPhoneGadgetStatus::Initial)))
     }
 
-    async fn start_iap2(&mut self) {
+    async fn start_iap2(&mut self) -> PhoneResult<()> {
         self.shutdown_iap2().await;
+
+        let path = self
+            .accessory
+            .as_ref()
+            .map(|accessory| accessory.iap2_devnode.trim())
+            .filter(|path| !path.is_empty())
+            .ok_or(CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch)?
+            .to_owned();
 
         let session = (self.csm)();
         let client = AsyncClient::new(true, CsmRemote::usb_gadget(), session);
-        // self.accessory_iap2_status.replace(client.0.subscribe());
-        let fd = IAP2Fd::open("/dev/iap2-0").expect("TODO");
+        let fd = IAP2Fd::open(&path).map_err(|error| CarPlayPhoneGadgetError::AccessoryFailedToOpenIAp2 {
+            path,
+            error: error.to_string(),
+        })?;
 
         let pipe = AsyncClientStream::new(client.0, client.1, fd);
         self.accessory_iap2.replace(pipe);
+        Ok(())
     }
 
     async fn shutdown_iap2(&mut self) {
@@ -178,16 +203,16 @@ impl CarPlayPhoneGadget {
 
 impl AsyncShutdown for CarPlayPhoneGadget {
     async fn shutdown(&mut self) {
-        let _ = self.stop_gadget().await;
         self.shutdown_iap2().await;
         self.accessory = None;
+        let _ = self.stop_gadget().await;
     }
 }
 
 impl CarPlayPhoneGadget {
     pub async fn stop_gadget(&mut self) -> PhoneResult<()> {
         if let Some(mut gadget) = self.gadget.take() {
-            let _ = gadget.unbind().await;
+            let _ = CarUsbTransport::shutdown(&mut gadget).await;
         }
         Ok(())
     }
@@ -201,11 +226,15 @@ impl CarPlayPhoneGadget {
 
         let udc = self.udc.as_ref().ok_or(CarPlayPhoneGadgetError::FailedGadgetCreate(GadgetError::MissingUdc))?;
 
-        let mut gadget = PhoneGadget::new(&self.iphone_instance, true, udc).map_err(CarPlayPhoneGadgetError::FailedGadgetCreate)?;
+        let mut gadget = PhoneGadget::new_with_serial(&self.iphone_instance, true, udc, self.iphone_serial.as_deref())
+            .map_err(CarPlayPhoneGadgetError::FailedGadgetCreate)?;
         debug!("Starting gadget");
 
-        if let Err(err) = gadget.bind().await.map_err(CarPlayPhoneGadgetError::FailedGadgetBind) {
-            gadget.shutdown().await;
+        if let Err(err) = CarUsbTransport::prepare_device(&mut gadget)
+            .await
+            .map_err(CarPlayPhoneGadgetError::FailedGadgetBind)
+        {
+            AsyncShutdown::shutdown(&mut gadget).await;
             return Err(err);
         }
 
@@ -222,7 +251,11 @@ impl EventSleeper for CarPlayPhoneGadget {
         event_select!(
             self.gadget,
             self.accessory_iap2,
-            deadline_after(if self.burst_wakeups { Duration::from_millis(20) } else { Duration::MAX })
+            deadline_after(if self.burst_wakeups {
+                Duration::from_millis(20)
+            } else {
+                Duration::MAX
+            })
         )
     }
 }
@@ -245,8 +278,7 @@ impl Reconcilable for CarPlayPhoneGadget {
         self.burst_wakeups = new.is_err()
             || matches!(
                 new,
-                Ok(CarPlayPhoneGadgetStatus::WaitingForStableMulticast)
-                    | Ok(CarPlayPhoneGadgetStatus::WaitingForAccessory { .. })
+                Ok(CarPlayPhoneGadgetStatus::WaitingForStableMulticast) | Ok(CarPlayPhoneGadgetStatus::WaitingForAccessory { .. })
             );
 
         new
@@ -342,7 +374,7 @@ impl Reconcilable for CarPlayPhoneGadget {
         }
 
         if status == CarPlayPhoneGadgetStatus::DetectedAccessory {
-            let Some(acc) = self.accessory.as_ref() else {
+            let Some(_acc) = self.accessory.as_ref() else {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
@@ -363,7 +395,7 @@ impl Reconcilable for CarPlayPhoneGadget {
             //         .map_err(CarPlayPhoneGadgetError::FailedUSBInterfaceClaim)?
             // };
 
-            self.start_iap2().await;
+            self.start_iap2().await?;
             return CarPlayPhoneGadgetStatus::WaitingForIAp2Session.into();
         }
 
@@ -384,7 +416,7 @@ impl Reconcilable for CarPlayPhoneGadget {
                 return CarPlayPhoneGadgetStatus::WaitingForIAp2Session.into();
             }
 
-            if accessory.ncm.is_none() {
+            if accessory.ncm_ifname.is_none() {
                 return CarPlayPhoneGadgetStatus::NonCarPlaySession.into();
             }
 
@@ -392,13 +424,33 @@ impl Reconcilable for CarPlayPhoneGadget {
         }
 
         if status == CarPlayPhoneGadgetStatus::ConfiguringNcm {
+            // The NCM netdev is renamed by udev (eth0 -> enx<mac>) a few
+            // milliseconds after the accessory is probed, so the interface name
+            // captured at DetectedAccessory time can already be stale by the
+            // time the interface is touched. Refresh it for the later stages..
+            let fresh = self.gadget.as_ref().and_then(|gadget| gadget.status().as_accessory());
+            if let Some(fresh) = fresh {
+                self.accessory.replace(fresh);
+            }
+
             let Some(acc) = self.accessory.as_ref() else {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
-            if let Some(ncm) = acc.ncm.as_ref() {
-                NcmHelper::configure_for_carplay(ncm, NcmHelper::LINK_LOCAL_IP_PHONE)
-                    .map_err(CarPlayPhoneGadgetError::AccessoryFailedNCM)?;
+            if acc.ncm_ifname.is_some() {
+                // Read the name from sysfs on every attempt. A call carrying the
+                // pre-rename name fails with `Device "eth0" does not exist`
+                // (measured on the ROCK) and the rename lands right in this
+                // window, which is what NcmHelper::retry is for. It has to be a
+                // direct read: gadget.status() returns a field that only
+                // reconcile() refreshes, and reconcile() does not run in here.
+                NcmHelper::retry(|| {
+                    let ncm = PhoneGadgetDriver::get_iap2_ifname(&self.iphone_instance)
+                        .map_err(|err| GadgetError::OtherString(format!("NCM interface unavailable during setup: {err}")))?;
+
+                    NcmHelper::configure_for_carplay(&ncm, NcmHelper::LINK_LOCAL_IP_PHONE)
+                })
+                .map_err(CarPlayPhoneGadgetError::AccessoryFailedNCM)?;
             };
 
             return CarPlayPhoneGadgetStatus::WaitingForStableMulticast.into();
@@ -409,7 +461,7 @@ impl Reconcilable for CarPlayPhoneGadget {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
-            let Some(ncm) = accessory.ncm.as_ref() else {
+            let Some(ncm) = accessory.ncm_ifname.as_ref() else {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
@@ -432,12 +484,12 @@ impl Reconcilable for CarPlayPhoneGadget {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
-            let Some(ncm) = accessory.ncm.as_ref() else {
+            let Some(ncm) = accessory.ncm_ifname.as_ref() else {
                 return CarPlayPhoneGadgetError::AccessoryFailedRoleSwitch.into();
             };
 
             return CarPlayPhoneGadgetStatus::CarPlaySession {
-                session_id: Uuid::new_v4().into(),
+                session_id: Uuid::new_v4().to_string(),
                 iface: ncm.into(),
                 ipv6_ll: NcmHelper::LINK_LOCAL_IP_PHONE_RAW.parse().unwrap(),
             }

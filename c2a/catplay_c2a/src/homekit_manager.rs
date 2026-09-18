@@ -1,4 +1,4 @@
-use std::{error::Error, path::Path};
+use std::error::Error;
 
 use catplay_hap::{HomekitStorageFile, HomekitStorageRef};
 
@@ -12,12 +12,9 @@ pub struct HomeKitManager {
 
 impl HomeKitManager {
     pub fn start(&mut self, config: &AppConfig, _mfi: &MfiManager) -> Result<(), Box<dyn Error>> {
-        let persist_dir = config
-            .persist_dir
-            .as_deref()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "persist_dir is required for HomeKit storage"))?;
-        let db_path_tx = Path::new(persist_dir).join("homekit_tx_db.bin");
-        let db_path_rx = Path::new(persist_dir).join("homekit_rx_db.bin");
+        let state_dir = config.state_dir();
+        let db_path_tx = state_dir.join("homekit_tx_db.bin");
+        let db_path_rx = state_dir.join("homekit_rx_db.bin");
 
         self.homekit_tx.replace(HomekitStorageFile::file(db_path_tx.to_str().unwrap())?);
         self.homekit_rx.replace(HomekitStorageFile::file(db_path_rx.to_str().unwrap())?);

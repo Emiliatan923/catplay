@@ -6,7 +6,7 @@ use std::{
 };
 use std::{net::TcpStream, time::Duration};
 
-use crate::{MfiDevice, MfiI2cError, MfiResult};
+use crate::{MfiAuthDigest, MfiDevice, MfiI2cError, MfiResult};
 
 fn send_command(stream: &mut TcpStream, cmd: u8, payload: &[u8]) -> MfiResult<Vec<u8>> {
     let len = (payload.len() as u16).to_be_bytes();
@@ -31,6 +31,14 @@ fn send_command(stream: &mut TcpStream, cmd: u8, payload: &[u8]) -> MfiResult<Ve
     }
 
     Ok(resp)
+}
+
+fn connect(addr: &str) -> MfiResult<TcpStream> {
+    let socket_addr = addr.to_socket_addrs()?.next().unwrap();
+    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(1000))?;
+    stream.set_write_timeout(Some(Duration::from_millis(1000)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
+    Ok(stream)
 }
 
 pub struct MfiDeviceRemoteClient {
@@ -58,10 +66,7 @@ impl MfiDevice for MfiDeviceRemoteClient {
             return Ok(cached_cert.clone());
         }
 
-        let socket_addr = self.addr.to_socket_addrs()?.next().unwrap();
-        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(1000))?;
-        stream.set_write_timeout(Some(Duration::from_millis(1000)))?;
-        stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
+        let mut stream = connect(&self.addr)?;
 
         debug!("Sending MFI remote command: read certificate");
         let ret = send_command(&mut stream, 0x01, &[])?;
@@ -73,13 +78,26 @@ impl MfiDevice for MfiDeviceRemoteClient {
 
     fn generate_challenge_response(&self, challenge: &[u8]) -> MfiResult<Vec<u8>> {
         debug!("Sending MFI remote command: generate challenge response");
-        let socket_addr = self.addr.to_socket_addrs()?.next().unwrap();
-        let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_millis(1000))?;
-        stream.set_write_timeout(Some(Duration::from_millis(1000)))?;
-        stream.set_read_timeout(Some(Duration::from_millis(5000)))?;
+        let mut stream = connect(&self.addr)?;
 
         let ret = send_command(&mut stream, 0x02, challenge)?;
         debug!("Sending MFI remote command: generate challenge response: OK");
         Ok(ret)
+    }
+
+    /// Ask the remote server which digest its chip wants.
+    ///
+    /// This deliberately does not fall back to inspecting the certificate
+    /// length: a server too old to answer command 0x03 makes auth-setup fail
+    /// here instead of silently signing with the wrong digest later.
+    fn authentication_digest(&self) -> MfiResult<MfiAuthDigest> {
+        debug!("Sending MFI remote command: authentication digest");
+        let mut stream = connect(&self.addr)?;
+        let response = send_command(&mut stream, 0x03, &[])?;
+        let code = *response
+            .first()
+            .ok_or_else(|| MfiI2cError::Remote("MFI server returned an empty authentication digest response".into()))?;
+        MfiAuthDigest::from_wire(code)
+            .ok_or_else(|| MfiI2cError::Remote(format!("MFI server returned unknown authentication digest 0x{code:02x}")))
     }
 }

@@ -20,7 +20,16 @@ fn read_as_string(path: &str) -> io::Result<String> {
 }
 
 fn verify_function(udc: &str, path: &str) -> GadgetResult<()> {
-    let function = read_as_string(path).map_err(|e| GadgetError::FailedUdcStatusCheck(e.into()))?;
+    let function = match read_as_string(path) {
+        Ok(function) => function,
+        // dwc3 tears the whole UDC down when the controller switches to host, so
+        // this file is legitimately absent for the whole 0x51 role switch. The
+        // Pi's dwc2 keeps its UDC, which is why this only shows up on the ROCK.
+        // A missing UDC means no gadget is bound, which is exactly what the
+        // check below is looking for; the caller still has its own timeout.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(GadgetError::FailedUdcStatusCheck(error.into())),
+    };
     let function = function.trim();
 
     if !function.is_empty() && !function.starts_with("iphone") {
@@ -185,8 +194,8 @@ impl PhoneGadgetDriver {
                 pid: Self::get_iap2_product_id(device_name)?,
                 manufacturer: Self::get_iap2_manufacturer(device_name)?,
                 product: Self::get_iap2_product(device_name)?,
-                iap2: Self::get_iap2_path(device_name)?,
-                ncm: Some(Self::get_iap2_ifname(device_name)?),
+                iap2_devnode: Self::get_iap2_path(device_name)?,
+                ncm_ifname: Some(Self::get_iap2_ifname(device_name)?),
             }),
             _ => GadgetStatus::Error(format!("unexpected g_iphone status: {}", status.trim()).into()),
         })
@@ -275,6 +284,10 @@ impl PhoneGadgetDriver {
     }
 
     pub fn new(device_name: &str, take_over: bool, udc: &str) -> GadgetResult<Self> {
+        Self::new_with_serial(device_name, take_over, udc, None)
+    }
+
+    pub fn new_with_serial(device_name: &str, take_over: bool, udc: &str, serial: Option<&str>) -> GadgetResult<Self> {
         let mut ownership = true;
 
         if Self::exists(device_name) && !take_over {
@@ -292,6 +305,10 @@ impl PhoneGadgetDriver {
             debug!("Attempting to create device: {device_name}");
             Self::create(device_name).map_err(PhoneGadgetDriverError::Create)?;
             Self::set_udc(device_name, udc).map_err(PhoneGadgetDriverError::Create)?;
+        }
+
+        if let Some(serial) = serial {
+            Self::set_serial(device_name, serial).map_err(PhoneGadgetDriverError::Create)?;
         }
 
         let me = Self {
@@ -329,12 +346,16 @@ impl PhoneGadgetDriver {
 
     pub async fn unbind_async(self: &Arc<Self>) -> GadgetResult<()> {
         let me = self.clone();
-        spawn_blocking(move || me.unbind()).await.unwrap()
+        spawn_blocking(move || me.unbind())
+            .await
+            .map_err(|error| GadgetError::OtherString(format!("g_iphone unbind worker failed: {error}")))?
     }
 
     pub async fn bind_async(self: &Arc<Self>) -> GadgetResult<()> {
         let me = self.clone();
-        spawn_blocking(move || me.bind()).await.unwrap()
+        spawn_blocking(move || me.bind())
+            .await
+            .map_err(|error| GadgetError::OtherString(format!("g_iphone bind worker failed: {error}")))?
     }
 }
 

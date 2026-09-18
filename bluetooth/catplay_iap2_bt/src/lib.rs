@@ -169,6 +169,17 @@ impl BluetoothManager {
         *self.last_connect.lock().unwrap()
     }
 
+    /// Verifies that bluetoothd still owns the configured adapter. A BlueZ
+    /// restart drops registered profiles, so callers must recreate this
+    /// manager when this check fails.
+    pub async fn healthcheck(&self) -> BluetoothResult<()> {
+        let address = BluezManager::new().get_address(&self.adapter).await?;
+        if self.mac_addr.as_deref() != Some(address.as_str()) {
+            return Err(io::Error::other("Bluetooth adapter identity changed").into());
+        }
+        Ok(())
+    }
+
     async fn start_iap2(&mut self) -> BluetoothResult<()> {
         let handle = tokio::runtime::Handle::current();
         let csm = self.csm.clone();

@@ -217,28 +217,16 @@ static int f_iphone_setup(struct usb_function *f,
 		}
 		case IPHONE_REQ_USBOOT: /* Launch userspace OTA usboot flow */
 		{
-			int ret;
-
 			if (!cdev->req || !cdev->gadget->ep0)
 				return -ENODEV;
-
-			ret = g_iphone_start_recovery(iphone_gadget);
-			if (ret)
-				pr_warn("iPhone: recovery request rejected: %d\n", ret);
-
+			pr_warn("iPhone: ignoring legacy usboot request on this platform\n");
 			return ep0_zlp(cdev);
 		}
 		case IPHONE_REQ_GADGET: /* Launch userspace gadget flow */
 		{
-			int ret;
-
 			if (!cdev->req || !cdev->gadget->ep0)
 				return -ENODEV;
-
-			ret = g_iphone_start_gadget(iphone_gadget);
-			if (ret)
-				pr_warn("iPhone: gadget request rejected: %d\n", ret);
-
+			pr_warn("iPhone: ignoring legacy gadget helper request on this platform\n");
 			return ep0_zlp(cdev);
 		}
 		}
