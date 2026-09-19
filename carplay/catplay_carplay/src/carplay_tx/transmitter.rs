@@ -452,17 +452,20 @@ impl AirPlayTransmitterBootstrapSession {
         // .await
         // .map_err(|e| RtspError::Code(format!("event port was not listening at time of setup ({})", e)))?;
 
-        let mut keep_alive_ip = peer_ip;
-        if let Some(keep_alive_port) = resp.keep_alive_port {
+        let keep_alive = if let Some(keep_alive_port) = resp.keep_alive_port {
+            let mut keep_alive_ip = peer_ip;
             keep_alive_ip.set_port(keep_alive_port);
-        }
-
-        let keep_alive = UdpHelper::connect(keep_alive_ip, KeepAliveClient::new())
-            .map_err(AirPlayTransmitterBootstrapError::FailedToBind)?
-            .0;
+            Some(
+                UdpHelper::connect(keep_alive_ip, KeepAliveClient::new())
+                    .map_err(AirPlayTransmitterBootstrapError::FailedToBind)?
+                    .0,
+            )
+        } else {
+            None
+        };
 
         streams.events.replace(events);
-        streams.keep_alive.replace(keep_alive);
+        streams.keep_alive = keep_alive;
         streams.timing.replace(timing_server.0);
         streams.cmd_drain.replace(cmd_drain);
         streams.media_clock.replace(media_clock);

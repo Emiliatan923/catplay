@@ -16,6 +16,7 @@ bytes = "1.11.0"
 crc32fast = { version = "1.5.0", default-features = false }
 libc = "0.2.183"
 thiserror = "2.0.18"
+exp-golomb = "0.1.0"
 
 yuv = "0.8.9"
 x264-sys = { version = "0.2.3", optional = true }
@@ -24,6 +25,10 @@ openh264-sys2 = { version = "0.9.3", optional = true }
 turbojpeg = { version = "1.4.0", default-features = false, features = [
     "cmake",
 ] }
+
+[dev-dependencies]
+insta = "1.44.3"
+openh264 = "0.9.3"
 
 [features]
 libyuv = []

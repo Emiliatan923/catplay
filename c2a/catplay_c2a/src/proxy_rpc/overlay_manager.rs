@@ -23,6 +23,7 @@ use tokio::task::spawn_blocking;
 pub struct OverlayManager {
     width: u32,
     height: u32,
+    fps: u32,
     dpi: f32,
     persist_dir: Option<PathBuf>,
     lazy_screen: Option<TeardownGuard<ScreenTransmitProxy>>,
@@ -43,10 +44,11 @@ pub struct OverlayManager {
 }
 
 impl OverlayManager {
-    pub fn new(width: u32, height: u32, dpi: f32, persist_dir: Option<PathBuf>, bluetooth_adapter: &str) -> Self {
+    pub fn new(width: u32, height: u32, fps: u32, dpi: f32, persist_dir: Option<PathBuf>, bluetooth_adapter: &str) -> Self {
         Self {
             width,
             height,
+            fps,
             dpi,
             persist_dir,
 
@@ -250,8 +252,8 @@ impl OverlayManager {
 
     pub fn init_renderer(&mut self) -> Arc<Mutex<UiRenderer>> {
         if self.renderer.is_none() {
-            let renderer =
-                UiRenderer::new(self.width as _, self.height as _, self.dpi, self.persist_dir.clone()).expect("failed to init renderer");
+            let renderer = UiRenderer::new(self.width as _, self.height as _, self.fps, self.dpi, self.persist_dir.clone())
+                .expect("failed to init renderer");
             self.renderer.replace(Arc::new(Mutex::new(renderer)));
             info!("Initialized UI renderer");
         }

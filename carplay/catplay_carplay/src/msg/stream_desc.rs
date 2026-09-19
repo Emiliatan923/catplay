@@ -122,31 +122,15 @@ plist_struct! {
     }
 }
 
-plist_enum_untagged! {
-    pub enum StreamDescriptionResponse {
-        Audio(StreamDescriptionResponseAudio),
-        Screen(StreamDescriptionResponseScreen),
-        #[default]
-        Invalid,
-    }
-}
-
 plist_struct! {
-    pub struct StreamDescriptionResponseScreen {
-        pub data_port: u16,
-        #[serde(rename = "type")]
-        pub stream_type: StreamType,
-    }
-}
-
-plist_struct! {
-    pub struct StreamDescriptionResponseAudio {
+    pub struct StreamDescriptionResponse {
         pub data_port: u16,
         #[serde(rename = "type")]
         pub stream_type: StreamType,
         #[serde(
             rename = "streamConnectionID",
-            with = "u64_as_i64"
+            with = "u64_as_i64",
+            default
         )]
         pub stream_connection_id: u64,
         pub control_port: Option<u16>,
@@ -226,8 +210,8 @@ impl StreamDescriptionAudio {
     }
 }
 
-impl StreamDescriptionResponseAudio {
-    pub fn new(
+impl StreamDescriptionResponse {
+    pub fn new_audio(
         stream_type: StreamType,
         stream_connection_id: u64,
         data_port: u16,
@@ -245,13 +229,12 @@ impl StreamDescriptionResponseAudio {
             ..Default::default()
         }
     }
-}
 
-impl StreamDescriptionResponseScreen {
-    pub fn new(data_port: u16) -> Self {
+    pub fn new_screen(data_port: u16) -> Self {
         Self {
             data_port,
             stream_type: StreamType::Screen,
+            ..Default::default()
         }
     }
 }
@@ -268,14 +251,16 @@ impl From<StreamDescriptionScreen> for StreamDescription {
     }
 }
 
-impl From<StreamDescriptionResponseAudio> for StreamDescriptionResponse {
-    fn from(value: StreamDescriptionResponseAudio) -> Self {
-        Self::Audio(value)
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl From<StreamDescriptionResponseScreen> for StreamDescriptionResponse {
-    fn from(value: StreamDescriptionResponseScreen) -> Self {
-        Self::Screen(value)
+    #[test]
+    fn response_without_stream_connection_id_deserializes_as_audio() {
+        let response: StreamDescriptionResponse = serde_json::from_str(r#"{"dataPort":65526,"type":100}"#).unwrap();
+
+        assert_eq!(response.data_port, 65526);
+        assert_eq!(response.stream_type, StreamType::MainAudio);
+        assert_eq!(response.stream_connection_id, 0);
     }
 }

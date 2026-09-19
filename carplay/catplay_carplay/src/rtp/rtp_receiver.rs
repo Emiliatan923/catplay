@@ -13,7 +13,7 @@ use crate::{
         },
     },
     cipher::AirPlayStreamEncryption,
-    msg::{StreamDescriptionAudio, StreamDescriptionResponseAudio, StreamType},
+    msg::{StreamDescriptionAudio, StreamDescriptionResponse, StreamType},
     rtp::{RTP_BUFFER_PAD, RTP_PACKET_MAX, RtcpSession, play::RtpSession, record::RtpSessionTx},
     rtsp_frame::{RtspError, RtspResult},
 };
@@ -214,7 +214,7 @@ impl RtpReceiver {
 
         mut encryption: AirPlayStreamEncryption,
 
-        d: &StreamDescriptionResponseAudio,
+        d: &StreamDescriptionResponse,
         // Recorder (required)
         recorder: (AudioEncoderDispatch, AudioRecorderBox<i16>),
     ) -> RtspResult<()> {

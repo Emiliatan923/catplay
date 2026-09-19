@@ -26,6 +26,8 @@ pub use yuv_shadow_buffer::*;
 mod h264;
 
 #[cfg(feature = "x264")]
+mod carplay_helpers;
+#[cfg(feature = "x264")]
 mod x264;
 #[cfg(feature = "x264")]
 pub use x264::*;

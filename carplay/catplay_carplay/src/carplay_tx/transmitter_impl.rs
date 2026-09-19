@@ -13,8 +13,7 @@ use crate::{
     cipher::AirPlayStreamEncryption,
     events::CommandPending,
     msg::{
-        AudioFormat, AudioType, Command, FeedbackPayload, Setup, StreamDescriptionAudio, StreamDescriptionResponse,
-        StreamDescriptionScreen, StreamType,
+        AudioFormat, AudioType, Command, FeedbackPayload, Setup, StreamDescriptionAudio, StreamDescriptionScreen, StreamType,
     },
     rtp::RtpReceiver,
     rtsp_frame::{RtspError, RtspFuture, RtspResult},
@@ -247,9 +246,9 @@ impl AirPlayTransmitterImpl {
 
         let resp = client.setup(setup).await?;
         let resp = resp.streams.first().ok_or(RtspError::ProtocolViolationGeneric)?;
-        let StreamDescriptionResponse::Audio(resp) = resp else {
+        if resp.stream_type != stream_type {
             return Err(RtspError::ProtocolViolationGeneric);
-        };
+        }
 
         info!("Audio setup response received: {resp:?}");
         // self.feedback_drift.register_stream(resp.stream_connection_id, stream_type, sample_rate);
@@ -322,9 +321,9 @@ impl AirPlayTransmitterImpl {
         info!("Sending screen SETUP: {setup:?}");
         let resp = client.setup(setup).await?;
         let resp = resp.streams.first().ok_or(RtspError::ProtocolViolation("invalid SETUP response"))?;
-        let StreamDescriptionResponse::Screen(resp) = resp else {
+        if resp.stream_type != StreamType::Screen {
             return Err(RtspError::ProtocolViolation("invalid SETUP response #2"));
-        };
+        }
         info!("Screen setup response received: {resp:?}");
 
         let mut video_ip = self.streams.peer_ip;

@@ -19,6 +19,8 @@ pub enum H264FrameBufferError {
     X264DefaultPreset(i32),
     #[error("x264 ApplyProfile: {0:?}")]
     X264ApplyProfile(i32),
+    #[error("x264 bitstream rewrite: {0}")]
+    X264BitstreamRewrite(&'static str),
     #[error("OpenH264: {0}")]
     #[cfg(feature = "openh264")]
     OpenH264(#[from] openh264::Error),

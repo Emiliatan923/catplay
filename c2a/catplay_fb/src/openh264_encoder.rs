@@ -14,7 +14,7 @@ pub struct OpenH264FrameBuffer {
 unsafe impl Send for OpenH264FrameBuffer {}
 
 impl OpenH264FrameBuffer {
-    pub fn new(width: i32, height: i32) -> Result<Self, H264FrameBufferError> {
+    pub fn new(width: i32, height: i32, _fps: i32) -> Result<Self, H264FrameBufferError> {
         let config = EncoderConfig::new()
             // .usage_type(UsageType::ScreenContentRealTime)
             .rate_control_mode(RateControlMode::Off)

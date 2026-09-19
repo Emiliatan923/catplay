@@ -17,6 +17,7 @@ use crate::ui::UiState;
 pub struct UiRenderer {
     width: i32,
     height: i32,
+    fps: u32,
     dpi: f32,
     fb: Renderer,
     h264: Option<H264FrameBuffer>,
@@ -40,10 +41,11 @@ pub type UiResult<T> = Result<T, UiError>;
 impl UiRenderer {
     const RELEASE_ENCODER_MEMORY: bool = true;
 
-    pub fn new(width: i32, height: i32, dpi: f32, persist_dir: Option<PathBuf>) -> UiResult<Self> {
+    pub fn new(width: i32, height: i32, fps: u32, dpi: f32, persist_dir: Option<PathBuf>) -> UiResult<Self> {
         Ok(Self {
             width,
             height,
+            fps,
             dpi,
             fb: Renderer::new(width, height, dpi),
             h264: None,
@@ -88,7 +90,7 @@ impl UiRenderer {
         let mut out = BytesMut::new();
         // Lazy-init encoder
         if self.h264.is_none() {
-            self.h264.replace(H264FrameBuffer::new(self.width, self.height)?);
+            self.h264.replace(H264FrameBuffer::new(self.width, self.height, self.fps as _)?);
         }
         let h264 = self.h264.as_mut().unwrap();
         h264.update_rgba(Canvas::as_rgba(self.fb.framebuffer()), &mut out)?;
@@ -259,7 +261,7 @@ impl UiRenderer {
 fn test_render() {
     use catplay_tracing::logger::setup_test_logger;
     setup_test_logger(true);
-    let mut renderer = UiRenderer::new(1920, 720, 168.0, None).unwrap();
+    let mut renderer = UiRenderer::new(1920, 720, 60, 168.0, None).unwrap();
     renderer
         .update(UiState::Connecting {
             device: "Test".into(),
@@ -268,6 +270,28 @@ fn test_render() {
         .unwrap();
     renderer.export_img_to_disk("test.png".into()).unwrap();
     renderer.export_h264_to_disk("test.h264".into()).unwrap();
+}
+
+#[test]
+fn test_rendered_frame_can_be_serialized_by_transmitter() {
+    use catplay_carplay::{clock::MediaClockSession, screen::ScreenFrame};
+
+    let mut renderer = UiRenderer::new(800, 480, 60, 160.0, None).unwrap();
+    let frame = renderer
+        .render_and_encode_frame(
+            UiState::Connecting {
+                device: "Test".into(),
+                ticks: 0,
+            },
+            Duration::ZERO,
+            false,
+        )
+        .unwrap();
+
+    assert!(!frame.data.is_empty(), "x264 must emit the first frame without requiring a flush");
+
+    ScreenFrame::video_proxied(frame, 4, &MediaClockSession::new())
+        .expect("renderer output must be accepted by the transmitter NAL serializer");
 }
 
 #[test]
@@ -281,7 +305,7 @@ fn test_waiting_for_connection_keyframe_cache_cycle() {
     let persist_dir = std::env::temp_dir().join(format!("catplay-ui-cache-test-{}-{unique}", std::process::id()));
     std::fs::create_dir(&persist_dir).unwrap();
 
-    let mut renderer = UiRenderer::new(1920, 720, 168.0, Some(persist_dir.clone())).unwrap();
+    let mut renderer = UiRenderer::new(1920, 720, 60, 168.0, Some(persist_dir.clone())).unwrap();
     renderer.render_and_encode_frame(UiState::WaitingForConnection, Duration::ZERO, false).unwrap();
 
     let cache_file = persist_dir.join("catplay_welcome.h264");

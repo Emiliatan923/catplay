@@ -33,8 +33,7 @@ use crate::{
     msg::{
         Command, CommandError, CommandIApSendMessage, ControllerFeature, ExtendedFeature, HevcInfo, InfoMessage, InfoMessageResponse,
         InfoMessageTxtAirPlayResponse, InitialSetup, InitialSetupResponse, Setup, SetupResponse, StreamDescription, StreamDescriptionAudio,
-        StreamDescriptionResponse, StreamDescriptionResponseAudio, StreamDescriptionResponseScreen, StreamDescriptionScreen, StreamType,
-        TeardownPayload,
+        StreamDescriptionResponse, StreamDescriptionScreen, StreamType, TeardownPayload,
     },
     pairing::PairingHelperRx,
     rtp::RtpReceiver,
@@ -636,8 +635,7 @@ impl AirPlayReceiver {
         let (helper, local) = TcpHelper::accept_timeout(bind_ip, Self::TCP_REVERSE_CONN_TIMEOUT, recv)?;
         self.streams.screen.replace(helper);
 
-        let resp = StreamDescriptionResponseScreen::new(local.port());
-        Ok(resp.into())
+        Ok(StreamDescriptionResponse::new_screen(local.port()))
     }
 
     async fn setup_audio(&mut self, mut stream: StreamDescriptionAudio) -> RtspResult<StreamDescriptionResponse> {
@@ -728,7 +726,7 @@ impl AirPlayReceiver {
 
         debug!("Created RtpReceiver");
 
-        let resp = StreamDescriptionResponseAudio::new(
+        let resp = StreamDescriptionResponse::new_audio(
             stream.stream_type,
             stream.stream_connection_id,
             receiver.local_port_rtp,
@@ -743,7 +741,7 @@ impl AirPlayReceiver {
             stream.stream_type, stream.audio_latency_ms
         );
 
-        Ok(resp.into())
+        Ok(resp)
     }
 
     async fn setup_stream(&mut self, stream: StreamDescription) -> RtspResult<StreamDescriptionResponse> {

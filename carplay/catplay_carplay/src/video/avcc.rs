@@ -10,6 +10,20 @@ pub struct AvccConfig {
     pub sps_pps: Vec<u8>,
 }
 
+fn find_annexb_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut pos = from;
+    while pos + 3 <= data.len() {
+        if data[pos..].starts_with(&[0, 0, 0, 1]) {
+            return Some((pos, 4));
+        }
+        if data[pos..].starts_with(&[0, 0, 1]) {
+            return Some((pos, 3));
+        }
+        pos += 1;
+    }
+    None
+}
+
 pub fn avcc_config_deserialize(data: &[u8]) -> Option<AvccConfig> {
     if data.len() < 6 || data[0] != 1 {
         return None;
@@ -80,27 +94,12 @@ pub fn avcc_config_serialize(avcc: &AvccConfig) -> Option<Vec<u8>> {
     let mut pps_list = Vec::new();
 
     let mut pos = 0;
-    let mut nal_start = None;
-    while pos + 3 < avcc.sps_pps.len() {
-        if avcc.sps_pps[pos..].starts_with(&START_CODE) {
-            if let Some(start) = nal_start {
-                let nal = &avcc.sps_pps[start..pos];
-                if !nal.is_empty() {
-                    match NalType::from_byte(nal[0]) {
-                        NalType::Sps => sps_list.push(nal.to_vec()),
-                        NalType::Pps => pps_list.push(nal.to_vec()),
-                        _ => {}
-                    }
-                }
-            }
-            nal_start = Some(pos + 4);
-            pos += 4;
-        } else {
-            pos += 1;
-        }
-    }
-    if let Some(start) = nal_start {
-        let nal = &avcc.sps_pps[start..];
+    while let Some((prefix_start, prefix_len)) = find_annexb_start_code(&avcc.sps_pps, pos) {
+        let start = prefix_start + prefix_len;
+        let end = find_annexb_start_code(&avcc.sps_pps, start)
+            .map(|(next_start, _)| next_start)
+            .unwrap_or(avcc.sps_pps.len());
+        let nal = &avcc.sps_pps[start..end];
         if !nal.is_empty() {
             match NalType::from_byte(nal[0]) {
                 NalType::Sps => sps_list.push(nal.to_vec()),
@@ -108,6 +107,7 @@ pub fn avcc_config_serialize(avcc: &AvccConfig) -> Option<Vec<u8>> {
                 _ => {}
             }
         }
+        pos = end;
     }
 
     if sps_list.is_empty() {
@@ -186,6 +186,29 @@ mod tests {
                     0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xE0, 0x1E, 0x89, 0x8B, 0x00, 0x00, 0x00, 0x01, 0x68, 0xCE,
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn serialize_ignores_three_byte_prefixed_sei_after_pps() {
+        let config = AvccConfig {
+            nal_size_len: 4,
+            sps_pps: vec![
+                0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, // SPS
+                0, 0, 0, 1, 0x68, 0xe9, 0x20, 0xfc, 0xb0, // PPS
+                0, 0, 1, 0x06, 0x05, 0xff, // SEI
+            ],
+        };
+
+        let serialized = avcc_config_serialize(&config).expect("annexb->avcc failed");
+        let decoded = avcc_config_deserialize(&serialized).expect("avcc->annexb failed");
+
+        assert_eq!(
+            decoded.sps_pps,
+            vec![
+                0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, // SPS
+                0, 0, 0, 1, 0x68, 0xe9, 0x20, 0xfc, 0xb0, // PPS
+            ]
         );
     }
 }

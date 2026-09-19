@@ -1,0 +1,70 @@
+---
+source: c2a/catplay_fb/src/x264.rs
+expression: snapshot
+---
+[
+    SpsPpsSnapshot {
+        width: 800,
+        height: 480,
+        fps: 30,
+        level: 31,
+        sps: "000000016764001fac131450320f69b80868303682211960",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 800,
+        height: 480,
+        fps: 60,
+        level: 31,
+        sps: "000000016764001fac131450320f69b80868303682211960",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 960,
+        height: 540,
+        fps: 30,
+        level: 31,
+        sps: "000000016764001fac1314503c045fb9b80868303682211960",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 960,
+        height: 540,
+        fps: 60,
+        level: 32,
+        sps: "0000000167640020ac1314503c045fb9b80868303682211960",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 1280,
+        height: 720,
+        fps: 30,
+        level: 31,
+        sps: "000000016764001fac13145014016e9b8086830368221196",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 1280,
+        height: 720,
+        fps: 60,
+        level: 32,
+        sps: "0000000167640020ac13145014016e9b8086830368221196",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 1920,
+        height: 720,
+        fps: 30,
+        level: 40,
+        sps: "0000000167640028ac1314501e016e9b8086830368221196",
+        pps: "0000000168ee3cb0",
+    },
+    SpsPpsSnapshot {
+        width: 1920,
+        height: 720,
+        fps: 60,
+        level: 42,
+        sps: "000000016764002aac1314501e016e9b8086830368221196",
+        pps: "0000000168ee3cb0",
+    },
+]
